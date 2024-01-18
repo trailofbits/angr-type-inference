@@ -14,6 +14,13 @@ test_location = os.path.join(bin_location, "tests")
 
 
 class TestTypehoon(unittest.TestCase):
+    def test_mooosl(self):
+        db = angr.angrdb.AngrDB()
+        proj: angr.Project = db.load(os.path.join(test_location, "x86_64", "mooosl.adb"))
+        vr = proj.analyses.VariableRecoveryFast(proj.kb.functions["lookup"])
+        proj.analyses.CompleteCallingConventions(proj.kb.functions["lookup"])
+        print(vr.type_constraints)
+        assert False
     def test_smoketest(self):
         p = angr.Project(os.path.join(test_location, "x86_64", "linked_list"), auto_load_libs=False)
         cfg = p.analyses.CFG(data_references=True, normalize=True)

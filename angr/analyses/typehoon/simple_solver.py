@@ -5,6 +5,8 @@ from typing import Union, Type, Callable
 
 import networkx
 
+from abc import abstractmethod, ABC
+
 from .typevars import (
     Existence,
     Equivalence,
@@ -71,78 +73,14 @@ class RecursiveType:
         self.offset = offset
 
 
-class SimpleSolver:
-    """
-    SimpleSolver is, literally, a simple, unification-based type constraint solver.
-    """
 
-    def __init__(self, bits: int, constraints):
-        if bits not in (32, 64):
-            raise ValueError("Pointer size %d is not supported. Expect 32 or 64." % bits)
 
-        self.bits = bits
-        self._constraints = constraints
-        self._base_lattice = BASE_LATTICES[bits]
-
-        #
-        # Solving state
-        #
+class BaseSolver(ABC):
+    def __init__(self, constraints) -> None:
         self._equivalence = {}
-        self._lower_bounds = defaultdict(BottomType)
-        self._upper_bounds = defaultdict(TopType)
-        self._recursive_types = defaultdict(set)
+        self._constraints = constraints
 
-        self.solve()
-        self.solution = self.determine()
 
-    def solve(self):
-        # import pprint
-        # pprint.pprint(self._constraints)
-
-        eq_constraints = self._eq_constraints_from_add()
-        self._constraints |= eq_constraints
-        constraints = self._handle_equivalence()
-        subtypevars, supertypevars = self._calculate_closure(constraints)
-        self._find_recursive_types(subtypevars)
-        self._compute_lower_upper_bounds(subtypevars, supertypevars)
-        self._lower_struct_fields()
-        self._convert_arrays(constraints)
-        # import pprint
-        # print("Lower bounds")
-        # pprint.pprint(self._lower_bounds)
-        # print("Upper bounds")
-        # pprint.pprint(self._upper_bounds)
-
-    def determine(self):
-        solution = {}
-
-        for v in self._lower_bounds:
-            if isinstance(v, TypeVariable) and not isinstance(v, DerivedTypeVariable):
-                lb = self._lower_bounds[v]
-                if isinstance(lb, BottomType):
-                    # use its upper bound instead
-                    solution[v] = self._upper_bounds[v]
-                else:
-                    solution[v] = lb
-
-        for v in self._upper_bounds:
-            if v not in solution:
-                ub = self._upper_bounds[v]
-                if not isinstance(ub, TopType):
-                    solution[v] = ub
-
-        for v, e in self._equivalence.items():
-            if v not in solution:
-                solution[v] = solution.get(e, None)
-
-        # import pprint
-        # print("Lower bounds")
-        # pprint.pprint(self._lower_bounds)
-        # print("Upper bounds")
-        # pprint.pprint(self._upper_bounds)
-        # print("Solution")
-        # pprint.pprint(solution)
-        return solution
 
     def _handle_equivalence(self):
         graph = networkx.Graph()
@@ -201,6 +139,8 @@ class SimpleSolver:
         self._equivalence = replacements
         return constraints
 
+
+
     def _eq_constraints_from_add(self):
         """
         Handle Add constraints.
@@ -223,6 +163,86 @@ class SimpleSolver:
                 ):
                     new_constraints.add(Equivalence(constraint.type_1, constraint.type_r))
         return new_constraints
+    
+    
+    @abstractmethod 
+    def solve_subtyping_constraints(self, constraints):
+        pass
+
+    def solve(self):
+        eq_constraints = self._eq_constraints_from_add()
+        self._constraints |= eq_constraints
+        constraints = self._handle_equivalence()
+        self.solve_subtyping_constraints(constraints)
+
+class SimpleSolver(BaseSolver):
+    """
+    SimpleSolver is, literally, a simple, unification-based type constraint solver.
+    """
+
+    def __init__(self, bits: int, constraints):
+        super.__init__(constraints)
+        if bits not in (32, 64):
+            raise ValueError("Pointer size %d is not supported. Expect 32 or 64." % bits)
+
+        self.bits = bits
+        self._base_lattice = BASE_LATTICES[bits]
+
+        #
+        # Solving state
+        #
+
+        self._lower_bounds = defaultdict(BottomType)
+        self._upper_bounds = defaultdict(TopType)
+        self._recursive_types = defaultdict(set)
+
+        self.solve()
+        self.solution = self.determine()
+
+    def solve_subtyping_constraints(self, constraints):
+        # import pprint
+        # pprint.pprint(self._constraints)
+        subtypevars, supertypevars = self._calculate_closure(constraints)
+        self._find_recursive_types(subtypevars)
+        self._compute_lower_upper_bounds(subtypevars, supertypevars)
+        self._lower_struct_fields()
+        self._convert_arrays(constraints)
+        # import pprint
+        # print("Lower bounds")
+        # pprint.pprint(self._lower_bounds)
+        # print("Upper bounds")
+        # pprint.pprint(self._upper_bounds)
+
+    def determine(self):
+        solution = {}
+
+        for v in self._lower_bounds:
+            if isinstance(v, TypeVariable) and not isinstance(v, DerivedTypeVariable):
+                lb = self._lower_bounds[v]
+                if isinstance(lb, BottomType):
+                    # use its upper bound instead
+                    solution[v] = self._upper_bounds[v]
+                else:
+                    solution[v] = lb
+
+        for v in self._upper_bounds:
+            if v not in solution:
+                ub = self._upper_bounds[v]
+                if not isinstance(ub, TopType):
+                    solution[v] = ub
+
+        for v, e in self._equivalence.items():
+            if v not in solution:
+                solution[v] = solution.get(e, None)
+
+        # import pprint
+        # print("Lower bounds")
+        # pprint.pprint(self._lower_bounds)
+        # print("Upper bounds")
+        # pprint.pprint(self._upper_bounds)
+        # print("Solution")
+        # pprint.pprint(solution)
+        return solution
 
     def _pointer_class(self) -> Union[Type[Pointer32], Type[Pointer64]]:
         if self.bits == 32:
