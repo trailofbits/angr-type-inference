@@ -5,11 +5,14 @@ from typing import Set
 from typehoon import TypeConstraint
 from typevars import Existence, Subtype, TypeVariable, DerivedTypeVariable
 from simple_solver import BaseSolver
+from enum import Enum
+from functools import partial, reduce
 
 import itertools
 
 # Import labels
 from typevars import FuncIn, FuncOut, Load, Store, ConvertTo, HasField
+from typing import TypeVar, Callable
 
 # A type variable is a unique holder of constraints
 
@@ -19,46 +22,92 @@ class VariableStorage:
     lower_bounds: list["ConsTy"]
     upper_bounds: list["ConsTy"]
 
+
 @dataclass
 class Atom:
     name: str
 
+
 """
 pointers are a function in the sense of "store tv" -> "load tv"
 """
-@dataclass 
+
+
+@dataclass
 class Pointer:
     store_tv: "ConsTy"
     load_tv: "ConsTy"
 
+
 @dataclass
 class Record:
-    fields: dict[int,"ConsTy"]
+    fields: dict[int, "ConsTy"]
+
 
 @dataclass
 class Func:
-    params: dict[int,"ConsTy"]
-    return_val: dict[int,"ConsTy"]
+    params: dict[int, "ConsTy"]
+    return_val: dict[int, "ConsTy"]
 
 
-
-
-
-ConsTy = VariableStorage | Pointer | Record  | Atom
+ConsTy = VariableStorage | Pointer | Record | Atom | Func
 
 
 @dataclass
 class FinalVar:
     ident: int
 
-ReprTy = Pointer | Record | Atom | FinalVar
 
+@dataclass
+class RecType:
+    bound: FinalVar
+    body: "ReprTy"
+
+
+@dataclass
+class Union:
+    lhs: "ReprTy"
+    rhs: "ReprTy"
+
+
+@dataclass
+class Intersection:
+    lhs: "ReprTy"
+    rhs: "ReprTy"
+
+
+ReprTy = Pointer | Record | Atom | FinalVar | Func | Union | Intersection
+
+
+K = TypeVar("K")
+V = TypeVar("V")
+V2 = TypeVar("V2")
 
 
 """
 Translates Retypd types into constrained type variables by collecting labels as
 type constructors
 """
+
+
+class Polarity(Enum):
+    POSITIVE = 1
+    NEGATIVE = 2
+
+    @staticmethod
+    def from_bool(b: bool) -> "Polarity":
+        return (Polarity.POSITIVE if b else Polarity.NEGATIVE)
+
+    def is_pos(self):
+        return self.value == Polarity.POSITIVE
+
+
+@dataclass
+class PolarVariable:
+    var: VariableStorage
+    polar: Polarity
+
+
 class ConstraintGenerator(BaseSolver):
     def __init__(self, ty_cons: Set["TypeConstraint"]) -> None:
         super.__init__(ty_cons)
@@ -66,13 +115,16 @@ class ConstraintGenerator(BaseSolver):
         self.orig_cons = {}
         self.solve()
         self.constrained_closed_list: Set[tuple[ConsTy, ConsTy]] = set()
-
+        self.allocated_real_vars = 0
+        # it's safe to keep recursive type variables global. if it was made recursive once it's always recursive
+        # the tricky bit is processing has to pick it up immutably
+        self.recursive_polar_types: dict[PolarVariable, FinalVar] = dict()
+        self.vstor_to_final_var: dict[VariableStorage, FinalVar] = dict()
 
     def solve_subtyping_constraints(self, constraints: Set["TypeConstraint"]):
         self.orig_cons = constraints
         self.infer_types()
-        
-    
+
     def infer_types(self):
         for cons in self.orig_cons:
             match cons:
@@ -84,14 +136,18 @@ class ConstraintGenerator(BaseSolver):
                     self.constrain(lhs, rhs)
                 case Existence(type_=ty):
                     self.base_var_map[ty] = self.type_of(ty)
-                    
+
+    def fresh_final(self) -> FinalVar:
+        res = FinalVar(self.allocated_real_vars)
+        self.allocated_real_vars += 1
+        return res
+
     def fresh(self) -> VariableStorage:
         return VariableStorage()
-    
+
     def type_of(self, ty: TypeVariable, child_type=None) -> ConsTy:
         if ty in self.base_var_map:
             return self.base_var_map[ty]
-
 
         prev_ty = child_type if child_type else self.fresh()
         ty_repr = None
@@ -100,24 +156,26 @@ class ConstraintGenerator(BaseSolver):
                 ty_repr = prev_ty
                 match label:
                     case Load():
-                            ld = ty_repr
-                            store = self.fresh()
-                            self.constrain(store,ld)
-                            self.type_of(base_var, child_type=Pointer(store,ld))
+                        ld = ty_repr
+                        store = self.fresh()
+                        self.constrain(store, ld)
+                        self.type_of(base_var, child_type=Pointer(store, ld))
                     case Store():
-                            store = prev_ty
-                            load = self.fresh()
-                            self.constrain(store, load)
-                            self.type_of(base_var, child_type=Pointer(store,ld))
-                    case HasField(bits=sz, offset=off):        
-                            # TODO(Ian): we should allow for refining an atom by a sz or something
-                            self.type_of(base_var, child_type=Record({off: prev_ty}))
+                        store = prev_ty
+                        load = self.fresh()
+                        self.constrain(store, load)
+                        self.type_of(base_var, child_type=Pointer(store, ld))
+                    case HasField(bits=sz, offset=off):
+                        # TODO(Ian): we should allow for refining an atom by a sz or something
+                        self.type_of(
+                            base_var, child_type=Record({off: prev_ty}))
                     case FuncIn(loc=loc) | FuncOut(loc=loc):
-                            nondef = {loc: prev_ty}
-                            self.type_of(base_var, Func(nondef if isinstance(label, FuncIn) else {}, nondef if isinstance(label, FuncOut) else {}))
+                        nondef = {loc: prev_ty}
+                        self.type_of(base_var, Func(nondef if isinstance(
+                            label, FuncIn) else {}, nondef if isinstance(label, FuncOut) else {}))
                     case _:
                         self.type_of(base_var, child_type=self.fresh())
-                                     
+
             case TypeVariable():
                 ty_repr = prev_ty
 
@@ -133,7 +191,7 @@ class ConstraintGenerator(BaseSolver):
         tup = (lhs, rhs)
         if tup in self.constrained_closed_list:
             return
-        
+
         self.constrained_closed_list.add((lhs, rhs))
 
         match (lhs, rhs):
@@ -141,32 +199,66 @@ class ConstraintGenerator(BaseSolver):
                 # shouldnt happen but fine
                 return
             case (Func(params=xps, return_vals=xrs), Func(params=yps, return_vals=yrs)):
-                self.constrain_dict_list(xps, yps)
+                self.constrain_dict_list(yps, xps)
                 self.constrain_dict_list(xrs, yrs)
             case (Record(fields=xf), Record(fields=yf)):
                 self.constrain_dict_list(xf, yf)
-            # xstr <= xl 
-            # ystr <= yl
-            # so the result is going to be    , xl <= yl
+            # covariant on the load and contravariant on the store
             case (Pointer(store_tv=xstv, load_tv=xltv), Pointer(store_tv=ystv, load_tv=yltv)):
-                raise NotImplementedError()
+                self.constrain(xltv, yltv)
+                self.constrain(ystv, xstv)
             # actual subtyping
             case (l, VariableStorage(lower_bounds=lbs, upper_bounds=ubs)):
                 lbs.append(l)
                 for x in ubs:
-                    self.constrain(l,x)
+                    self.constrain(l, x)
             case (VariableStorage(lower_bounds=lbs, upper_bounds=ubs), u):
                 ubs.append(u)
                 for x in lbs:
                     self.constrain(x, u)
 
+    @staticmethod
+    def map_value(f: Callable[[V], V2], d: dict[K, V]) -> dict[K, V2]:
+        return dict(map(lambda kv: (kv[0], f(kv[1])), d.items()))
+
+    def final_var_for_variable(self, vstor: VariableStorage) -> FinalVar:
+        return self.vstor_to_final_var.get(vstor, lambda: self.fresh_final())
+
+    def coalesce_acc(self, ty: ConsTy, processing: frozenset[PolarVariable],  is_pos: bool) -> ReprTy:
+        rec_pos = partial(self.coalesce_acc,
+                          processing=processing, is_pos=is_pos)
+        rec_neg = partial(self.coalesce_acc,
+                          processing=processing, is_pos=(not is_pos))
+        match ty:
+            case Atom(name=aty):
+                return Atom(aty)
+            case Func(params=prs, return_vals=rets):
+                return Func(ConstraintGenerator.map_value(rec_neg, prs), ConstraintGenerator.map_value(rec_pos, rets))
+            case Record(fields=fs):
+                return Record(rec_pos(fs))
+            case Pointer(store_tv=stv, load_tv=lv):
+                return Pointer(rec_neg(stv), rec_pos(lv))
+            case VariableStorage(lower_bounds=lbs, upper_bounds=ubs):
+                polar_v = PolarVariable(ty, Polarity.from_bool(is_pos))
+                if polar_v in processing:
+                    return self.recursive_polar_types.get(
+                        polar_v, lambda: self.fresh_final())
+                else:
+                    vs = self.final_var_for_variable(ty)
+                    curr_bounds = lbs if is_pos else ubs
+                    mrg = Union if is_pos else Intersection
+                    res_ty = reduce(mrg, curr_bounds, vs)
+                    if polar_v in self.recursive_polar_types:
+                        return RecType(self.recursive_polar_types[polar_v], res_ty)
+                    else:
+                        return res_ty
 
     def coalesce(self, ty: ConsTy) -> ReprTy:
-        pass
+        return self.coalesce_acc(ty, frozenset(), True)
 
     def coalesce_types(self) -> dict[TypeVariable, ReprTy]:
         tot = dict()
-        for (k,v) in self.base_var_map.items():
+        for (k, v) in self.base_var_map.items():
             if isinstance(k, TypeVariable):
                 tot[k] = self.coalesce(v)
         return tot
@@ -175,6 +267,7 @@ class ConstraintGenerator(BaseSolver):
 class Compactor:
     def __init__(self) -> None:
         pass
+
 
 class Rewriter:
     def __init__(self) -> None:
