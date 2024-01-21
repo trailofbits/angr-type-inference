@@ -181,7 +181,7 @@ class SimpleSolver(BaseSolver):
     """
 
     def __init__(self, bits: int, constraints):
-        super.__init__(constraints)
+        super().__init__(constraints)
         if bits not in (32, 64):
             raise ValueError("Pointer size %d is not supported. Expect 32 or 64." % bits)
 
