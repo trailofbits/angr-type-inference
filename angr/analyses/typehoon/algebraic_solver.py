@@ -221,8 +221,15 @@ class ConstraintGenerator(BaseSolver):
     def map_value(f: Callable[[V], V2], d: dict[K, V]) -> dict[K, V2]:
         return dict(map(lambda kv: (kv[0], f(kv[1])), d.items()))
 
+    def get_or_insert(k: K, f: Callable[[], V], d: dict[K, V]) -> V:
+        if k in d:
+            return d[k]
+        else:
+            d[k] = f()
+            return d[k]
+
     def final_var_for_variable(self, vstor: VariableStorage) -> FinalVar:
-        return self.vstor_to_final_var.get(vstor, lambda: self.fresh_final())
+        return ConstraintGenerator.get_or_insert(vstor, self.vstor_to_final_var, lambda: self.fresh_final())
 
     def coalesce_acc(self, ty: ConsTy, processing: frozenset[PolarVariable],  is_pos: bool) -> ReprTy:
         rec_pos = partial(self.coalesce_acc,
@@ -241,8 +248,7 @@ class ConstraintGenerator(BaseSolver):
             case VariableStorage(lower_bounds=lbs, upper_bounds=ubs):
                 polar_v = PolarVariable(ty, Polarity.from_bool(is_pos))
                 if polar_v in processing:
-                    return self.recursive_polar_types.get(
-                        polar_v, lambda: self.fresh_final())
+                    return ConstraintGenerator.get_or_insert(polar_v, lambda: self.fresh_final(), self.recursive_polar_types)
                 else:
                     vs = self.final_var_for_variable(ty)
                     curr_bounds = lbs if is_pos else ubs
