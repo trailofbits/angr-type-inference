@@ -2,28 +2,29 @@
 
 from dataclasses import dataclass
 from typing import Set
-from typehoon import TypeConstraint
-from typevars import Existence, Subtype, TypeVariable, DerivedTypeVariable
-from simple_solver import BaseSolver
+from .typevars import Existence, Subtype, TypeVariable, DerivedTypeVariable, TypeConstraint
+from .simple_solver import BaseSolver
 from enum import Enum
 from functools import partial, reduce
+import copy
 
 import itertools
 
 # Import labels
-from typevars import FuncIn, FuncOut, Load, Store, ConvertTo, HasField
+from .typevars import FuncIn, FuncOut, Load, Store, ConvertTo, HasField
 from typing import TypeVar, Callable
 
 # A type variable is a unique holder of constraints
 
 
-@dataclass
+# we give vstorage identity based
+@dataclass(eq=False)
 class VariableStorage:
     lower_bounds: list["ConsTy"]
     upper_bounds: list["ConsTy"]
 
 
-@dataclass
+@dataclass(frozen=True)
 class Atom:
     name: str
 
@@ -33,44 +34,73 @@ pointers are a function in the sense of "store tv" -> "load tv"
 """
 
 
-@dataclass
+@dataclass(frozen=True)
 class Pointer:
     store_tv: "ConsTy"
     load_tv: "ConsTy"
 
 
-@dataclass
+class HashDict:
+    def __init__(self, d) -> None:
+        self.d = copy.deepcopy(d)
+        assert self.d is not None
+
+    def __eq__(self, v: object) -> bool:
+        return isinstance(v, HashDict) and tuple(sorted(self.d.items())) == tuple(sorted(v.items()))
+
+    def __hash__(self) -> int:
+        return hash(tuple(sorted(self.d.items())))
+
+    def __repr__(self) -> str:
+        return f"HashDict(d={self.d})"
+
+    def __len__(self):
+        return len(self.d)
+
+    def items(self):
+        return self.d.items()
+
+
+@dataclass(frozen=False, init=False, unsafe_hash=True, eq=True)
 class Record:
     fields: dict[int, "ConsTy"]
 
+    def __init__(self, d) -> None:
+        self.fields = HashDict(d)
+        assert len(self.fields) > 0
 
-@dataclass
+
+@dataclass(frozen=False, init=False, unsafe_hash=True, eq=True)
 class Func:
     params: dict[int, "ConsTy"]
     return_val: dict[int, "ConsTy"]
+
+    def __init__(self, p, r) -> None:
+        self.params = HashDict(p)
+        self.return_val = HashDict(r)
 
 
 ConsTy = VariableStorage | Pointer | Record | Atom | Func
 
 
-@dataclass
+@dataclass(frozen=True)
 class FinalVar:
     ident: int
 
 
-@dataclass
+@dataclass(frozen=True)
 class RecType:
     bound: FinalVar
     body: "ReprTy"
 
 
-@dataclass
+@dataclass(frozen=True)
 class Union:
     lhs: "ReprTy"
     rhs: "ReprTy"
 
 
-@dataclass
+@dataclass(frozen=True)
 class Intersection:
     lhs: "ReprTy"
     rhs: "ReprTy"
@@ -102,7 +132,7 @@ class Polarity(Enum):
         return self.value == Polarity.POSITIVE
 
 
-@dataclass
+@dataclass(frozen=True)
 class PolarVariable:
     var: VariableStorage
     polar: Polarity
@@ -110,20 +140,23 @@ class PolarVariable:
 
 class ConstraintGenerator(BaseSolver):
     def __init__(self, ty_cons: Set["TypeConstraint"]) -> None:
-        super.__init__(ty_cons)
+        super().__init__(ty_cons)
         self.base_var_map: dict[TypeVariable, ConsTy] = {}
         self.orig_cons = {}
-        self.solve()
         self.constrained_closed_list: Set[tuple[ConsTy, ConsTy]] = set()
         self.allocated_real_vars = 0
         # it's safe to keep recursive type variables global. if it was made recursive once it's always recursive
         # the tricky bit is processing has to pick it up immutably
         self.recursive_polar_types: dict[PolarVariable, FinalVar] = dict()
         self.vstor_to_final_var: dict[VariableStorage, FinalVar] = dict()
+        self.solved_types = {}
+
+        self.solve()
 
     def solve_subtyping_constraints(self, constraints: Set["TypeConstraint"]):
         self.orig_cons = constraints
         self.infer_types()
+        self.solved_types = self.coalesce_types()
 
     def infer_types(self):
         for cons in self.orig_cons:
@@ -143,7 +176,7 @@ class ConstraintGenerator(BaseSolver):
         return res
 
     def fresh(self) -> VariableStorage:
-        return VariableStorage()
+        return VariableStorage(list(), list())
 
     def type_of(self, ty: TypeVariable, child_type=None) -> ConsTy:
         if ty in self.base_var_map:
@@ -229,7 +262,7 @@ class ConstraintGenerator(BaseSolver):
             return d[k]
 
     def final_var_for_variable(self, vstor: VariableStorage) -> FinalVar:
-        return ConstraintGenerator.get_or_insert(vstor, self.vstor_to_final_var, lambda: self.fresh_final())
+        return ConstraintGenerator.get_or_insert(vstor, lambda: self.fresh_final(), self.vstor_to_final_var)
 
     def coalesce_acc(self, ty: ConsTy, processing: frozenset[PolarVariable],  is_pos: bool) -> ReprTy:
         rec_pos = partial(self.coalesce_acc,
@@ -242,7 +275,7 @@ class ConstraintGenerator(BaseSolver):
             case Func(params=prs, return_vals=rets):
                 return Func(ConstraintGenerator.map_value(rec_neg, prs), ConstraintGenerator.map_value(rec_pos, rets))
             case Record(fields=fs):
-                return Record(rec_pos(fs))
+                return Record(ConstraintGenerator.map_value(rec_pos, fs))
             case Pointer(store_tv=stv, load_tv=lv):
                 return Pointer(rec_neg(stv), rec_pos(lv))
             case VariableStorage(lower_bounds=lbs, upper_bounds=ubs):
@@ -251,13 +284,15 @@ class ConstraintGenerator(BaseSolver):
                     return ConstraintGenerator.get_or_insert(polar_v, lambda: self.fresh_final(), self.recursive_polar_types)
                 else:
                     vs = self.final_var_for_variable(ty)
-                    curr_bounds = lbs if is_pos else ubs
+                    curr_bounds = map(partial(
+                        self.coalesce_acc, processing=processing.union([polar_v]), is_pos=is_pos), (lbs if is_pos else ubs))
                     mrg = Union if is_pos else Intersection
                     res_ty = reduce(mrg, curr_bounds, vs)
                     if polar_v in self.recursive_polar_types:
                         return RecType(self.recursive_polar_types[polar_v], res_ty)
                     else:
                         return res_ty
+        assert False
 
     def coalesce(self, ty: ConsTy) -> ReprTy:
         return self.coalesce_acc(ty, frozenset(), True)
