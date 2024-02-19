@@ -12,7 +12,7 @@ import itertools
 
 # Import labels
 from .typevars import FuncIn, FuncOut, Load, Store, ConvertTo, HasField, BaseLabel
-from typing import TypeVar, Callable
+from typing import TypeVar, Callable, Optional
 
 # A type variable is a unique holder of constraints
 
@@ -250,31 +250,32 @@ class ConstraintGenerator(BaseSolver):
         self.constrain(ty, oty)
         self.constrain(oty, ty)
 
-    def type_of_labels(self, rst: Iterator[BaseLabel]):
+    def type_of_labels(self, rst: Iterator[BaseLabel]) -> tuple[ConsTy, VariableStorage]:
         elem = next(rst, None)
         if elem:
             return self.handle_label(elem, rst)
         else:
-            return self.fresh()
+            nty = self.fresh()
+            return (nty, nty)
 
-    def handle_label(self, label: BaseLabel, rst: Iterator[BaseLabel]):
-        prev_ty = self.type_of_labels(rst)
+    def handle_label(self, label: BaseLabel, rst: Iterator[BaseLabel]) -> tuple[Optional[ConsTy], VariableStorage]:
+        (prev_ty, storage) = self.type_of_labels(rst)
         match label:
             case Load():
                 store = self.fresh()
                 self.constrain(store, prev_ty)
-                return Pointer(store, prev_ty)
+                return (Pointer(store, prev_ty), storage)
             case Store():
                 load = self.fresh()
                 self.constrain(prev_ty, load)
                 return Pointer(prev_ty, load)
             case HasField(bits=sz, offset=off):
                 # TODO(Ian): we should allow for refining an atom by a sz or something
-                return Record({off: prev_ty})
+                return (Record({off: prev_ty}), storage)
             case FuncIn(loc=loc) | FuncOut(loc=loc):
                 nondef = {loc: prev_ty}
-                return Func(nondef if isinstance(
-                    label, FuncIn) else {}, nondef if isinstance(label, FuncOut) else {})
+                return (Func(nondef if isinstance(
+                    label, FuncIn) else {}, nondef if isinstance(label, FuncOut) else {}), storage)
             case _:
                 print(label)
                 assert False
@@ -292,9 +293,9 @@ class ConstraintGenerator(BaseSolver):
         match ty:
             case DerivedTypeVariable(type_var=base_var, labels=label):
                 v = get_ty_var(base_var)
-                lb_ty = self.type_of_labels(iter(label))
+                (lb_ty, storage) = self.type_of_labels(iter(label))
                 self.unify(v, lb_ty)
-                return v
+                return storage
             case TypeVariable():
                 return get_ty_var(ty)
             case _:
