@@ -43,7 +43,7 @@ class TestTypehoon(unittest.TestCase):
         s3 = Subtype(tv3, tv1)
         s4 = Subtype(DerivedTypeVariable(tv_func, FuncIn(0)), tv1)
 
-        solved = ConstraintGenerator(set([s1, s2, s3, s4]))
+        solved = ConstraintGenerator({tv_func: set([s1, s2, s3, s4])})
         print("tys: ")
         print(solved.base_var_map)
         print(solved.solved_types)
@@ -56,6 +56,10 @@ class TestTypehoon(unittest.TestCase):
         vr = proj.analyses.VariableRecoveryFast(proj.kb.functions["lookup"])
         proj.analyses.CompleteCallingConventions(proj.kb.functions["lookup"])
         print(vr.type_constraints)
+
+        for k in vr.type_constraints.keys():
+            print(type(k))
+
         print(vr.var_to_typevars)
 
         solved = ConstraintGenerator(vr.type_constraints)
@@ -83,7 +87,8 @@ class TestTypehoon(unittest.TestCase):
         # pprint.pprint(vr._outstates[0x4005b2].typevars._typevars)
         # pprint.pprint(tcons)
 
-        _ = p.analyses.Typehoon(tcons, vr.func_typevar, var_mapping=vr.var_to_typevars)
+        _ = p.analyses.Typehoon(tcons, vr.func_typevar,
+                                var_mapping=vr.var_to_typevars)
         # pprint.pprint(t.simtypes_solution)
 
         # convert function blocks to AIL blocks
@@ -108,7 +113,8 @@ class TestTypehoon(unittest.TestCase):
 
     def test_function_call_argument_type_propagation(self):
         # ensure that UNICODE_STRING is propagated to stack variables from calls to RtlInitUnicodeString
-        proj = angr.Project(os.path.join(test_location, "x86_64", "windows", "sioctl.sys"), auto_load_libs=False)
+        proj = angr.Project(os.path.join(
+            test_location, "x86_64", "windows", "sioctl.sys"), auto_load_libs=False)
         cfg = proj.analyses.CFG(normalize=True)
         main_func = cfg.kb.functions[0x140006000]
         proj.analyses.VariableRecoveryFast(main_func)
@@ -140,8 +146,10 @@ class TestTypehoon(unittest.TestCase):
                 Subtype(DerivedTypeVariable(func_f, FuncIn(0)), t2),
                 Subtype(t1, t0),
                 Subtype(t2, t0),
-                Subtype(DerivedTypeVariable(t0, None, labels=[Load(), HasField(32, 0)]), t1),
-                Subtype(DerivedTypeVariable(t0, None, labels=[Load(), HasField(32, 4)]), Int32()),
+                Subtype(DerivedTypeVariable(
+                    t0, None, labels=[Load(), HasField(32, 0)]), t1),
+                Subtype(DerivedTypeVariable(t0, None, labels=[
+                        Load(), HasField(32, 4)]), Int32()),
                 Subtype(Int32(), DerivedTypeVariable(func_f, FuncOut(0))),
             },
             func_close: set(),

@@ -1,7 +1,7 @@
 
 
 from dataclasses import dataclass
-from typing import Set
+from typing import Set, Iterator
 from .typevars import Existence, Subtype, TypeVariable, DerivedTypeVariable, TypeConstraint
 from .simple_solver import BaseSolver
 from enum import Enum
@@ -11,7 +11,7 @@ import copy
 import itertools
 
 # Import labels
-from .typevars import FuncIn, FuncOut, Load, Store, ConvertTo, HasField
+from .typevars import FuncIn, FuncOut, Load, Store, ConvertTo, HasField, BaseLabel
 from typing import TypeVar, Callable
 
 # A type variable is a unique holder of constraints
@@ -220,18 +220,19 @@ class ConstraintGenerator(BaseSolver):
         self.solved_types = self.coalesce_types()
 
     def infer_types(self):
-        for cons in self.orig_cons:
-            match cons:
-                case Subtype(sub_type=subty, super_type=sty):
-                    lhs = self.type_of(subty)
-                    rhs = self.type_of(sty)
-                    self.base_var_map[subty] = lhs
-                    self.base_var_map[sty] = rhs
-                    self.constrain(lhs, rhs)
-                case Existence(type_=ty):
-                    self.base_var_map[ty] = self.type_of(ty)
-                case _:
-                    assert False
+        for (f, cons_set) in self.orig_cons.items():
+            for cons in cons_set:
+                match cons:
+                    case Subtype(sub_type=subty, super_type=sty):
+                        lhs = self.type_of(subty)
+                        rhs = self.type_of(sty)
+                        self.base_var_map[subty] = lhs
+                        self.base_var_map[sty] = rhs
+                        self.constrain(lhs, rhs)
+                    case Existence(type_=ty):
+                        self.base_var_map[ty] = self.type_of(ty)
+                    case _:
+                        assert False
 
     def fresh_final(self) -> FinalVar:
         res = FinalVar(self.allocated_real_vars)
@@ -249,42 +250,55 @@ class ConstraintGenerator(BaseSolver):
         self.constrain(ty, oty)
         self.constrain(oty, ty)
 
-    def type_of(self, ty: TypeVariable, child_type=None) -> ConsTy:
+    def type_of_labels(self, rst: Iterator[BaseLabel]):
+        elem = next(rst, None)
+        if elem:
+            return self.handle_label(elem, rst)
+        else:
+            return self.fresh()
+
+    def handle_label(self, label: BaseLabel, rst: Iterator[BaseLabel]):
+        prev_ty = self.type_of_labels(rst)
+        match label:
+            case Load():
+                store = self.fresh()
+                self.constrain(store, prev_ty)
+                return Pointer(store, prev_ty)
+            case Store():
+                load = self.fresh()
+                self.constrain(prev_ty, load)
+                return Pointer(prev_ty, load)
+            case HasField(bits=sz, offset=off):
+                # TODO(Ian): we should allow for refining an atom by a sz or something
+                return Record({off: prev_ty})
+            case FuncIn(loc=loc) | FuncOut(loc=loc):
+                nondef = {loc: prev_ty}
+                return Func(nondef if isinstance(
+                    label, FuncIn) else {}, nondef if isinstance(label, FuncOut) else {})
+            case _:
+                print(label)
+                assert False
+
+    def type_of(self, ty: TypeVariable) -> ConsTy:
 
         if isinstance(ty, Atom):
             return ty
 
-        prev_ty = child_type if child_type else self.fresh()
+        def get_ty_var(bv: TypeVariable) -> VariableStorage:
+            if not (bv in self.base_var_map):
+                self.base_var_map[bv] = self.fresh()
+            return self.base_var_map[bv]
+
         match ty:
-            case DerivedTypeVariable(type_var=base_var, label=label):
-                match label:
-                    case Load():
-                        ld = prev_ty
-                        store = self.fresh()
-                        self.constrain(store, ld)
-                        self.type_of(base_var, child_type=Pointer(store, ld))
-                    case Store():
-                        store = prev_ty
-                        load = self.fresh()
-                        self.constrain(store, load)
-                        self.type_of(base_var, child_type=Pointer(store, ld))
-                    case HasField(bits=sz, offset=off):
-                        # TODO(Ian): we should allow for refining an atom by a sz or something
-                        self.type_of(
-                            base_var, child_type=Record({off: prev_ty}))
-                    case FuncIn(loc=loc) | FuncOut(loc=loc):
-                        nondef = {loc: prev_ty}
-                        self.type_of(base_var, Func(nondef if isinstance(
-                            label, FuncIn) else {}, nondef if isinstance(label, FuncOut) else {}))
-                    case _:
-                        self.type_of(base_var, child_type=self.fresh())
-
+            case DerivedTypeVariable(type_var=base_var, labels=label):
+                v = get_ty_var(base_var)
+                lb_ty = self.type_of_labels(iter(label))
+                self.unify(v, lb_ty)
+                return v
             case TypeVariable():
-                if not (ty in self.base_var_map):
-                    self.base_var_map[ty] = self.fresh()
-
-                self.unify(self.base_var_map[ty], prev_ty)
-        return prev_ty
+                return get_ty_var(ty)
+            case _:
+                assert False
 
     def constrain_dict_list(self, x: dict, y: dict):
         for k in itertools.chain(x.keys(), y.keys()):
@@ -385,10 +399,10 @@ class ConstraintGenerator(BaseSolver):
 
     def coalesce_types(self) -> dict[TypeVariable, ReprTy]:
         tot = dict()
-        for (k, v) in self.base_var_map.items():
+        for k in self.orig_cons.keys():
             if isinstance(k, TypeVariable):
                 print(f"Coalescing: {k}")
-                tot[k] = self.coalesce(v)
+                tot[k] = self.coalesce(self.base_var_map[k])
         return tot
 
 
