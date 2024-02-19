@@ -201,8 +201,7 @@ class ConstraintGenerator(BaseSolver):
         self.recursive_polar_types: dict[PolarVariable, FinalVar] = dict()
         self.vstor_to_final_var: dict[VariableStorage, FinalVar] = dict()
         self.solved_types = {}
-
-        self.solve()
+        self.solve_subtyping_constraints(self._constraints)
 
     def dump_state(self) -> str:
         base = str(self.base_var_map) + "\n"
