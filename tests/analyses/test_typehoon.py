@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # pylint:disable=missing-class-docstring,no-self-use
 from angr.angrdb import AngrDB
-from angr.analyses.typehoon.algebraic_solver import ConstraintGenerator
+from angr.analyses.typehoon.algebraic_solver import ConstraintGenerator, Atom
+from angr.analyses.typehoon.typevars import TypeConstraint, Subtype, Load, HasField, TypeVariable, DerivedTypeVariable, FuncIn
 __package__ = __package__ or "tests.analyses"  # pylint:disable=redefined-builtin
 
 import os
@@ -16,6 +17,28 @@ test_location = os.path.join(bin_location, "tests")
 
 
 class TestTypehoon(unittest.TestCase):
+
+    def test_rec_type_solver(self):
+        tv_func = TypeVariable()
+
+        tv1 = TypeVariable()
+        tv2 = TypeVariable()
+        tv3 = TypeVariable()
+
+        load_at_40 = DerivedTypeVariable(
+            DerivedTypeVariable(tv1, Load()), HasField(64, 40))
+
+        s1 = Subtype(load_at_40, tv2)
+        s2 = Subtype(tv2, tv3)
+        s3 = Subtype(tv3, tv1)
+        s4 = Subtype(DerivedTypeVariable(tv_func, FuncIn(0)), tv1)
+
+        solved = ConstraintGenerator(set([s1, s2, s3, s4]))
+        print("tys: ")
+        print(solved.base_var_map)
+        print(solved.solved_types)
+        assert False
+
     def test_mooosl(self):
         db = AngrDB()
         proj: angr.Project = db.load(os.path.join(
@@ -23,8 +46,16 @@ class TestTypehoon(unittest.TestCase):
         vr = proj.analyses.VariableRecoveryFast(proj.kb.functions["lookup"])
         proj.analyses.CompleteCallingConventions(proj.kb.functions["lookup"])
         print(vr.type_constraints)
+        print(vr.var_to_typevars)
+
         solved = ConstraintGenerator(vr.type_constraints)
         print(solved.solved_types)
+        for s in [v for (k, v) in vr.var_to_typevars.items() if k.name == "s_10"]:
+            for tv in s:
+                print(tv)
+                if tv in solved.solved_types:
+                    print(tv)
+                    print(solved.solved_types[tv])
         assert False
 
     def test_smoketest(self):

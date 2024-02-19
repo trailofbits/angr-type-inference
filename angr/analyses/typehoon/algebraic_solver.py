@@ -18,10 +18,22 @@ from typing import TypeVar, Callable
 
 
 # we give vstorage identity based
-@dataclass(eq=False)
+@dataclass(eq=False, init=False)
 class VariableStorage:
     lower_bounds: list["ConsTy"]
     upper_bounds: list["ConsTy"]
+    id: int
+
+    tot_ids = 0
+
+    def __init__(self, lbs, ubs) -> None:
+        self.lower_bounds = lbs
+        self.upper_bounds = ubs
+        self.id = VariableStorage.tot_ids
+        VariableStorage.tot_ids += 1
+
+    def __repr__(self) -> str:
+        return f"vstr{self.id}"
 
 
 @dataclass(frozen=True)
@@ -38,6 +50,9 @@ pointers are a function in the sense of "store tv" -> "load tv"
 class Pointer:
     store_tv: "ConsTy"
     load_tv: "ConsTy"
+
+    def __repr__(self) -> str:
+        return f"ptr(str: {self.store_tv}, ld: {self.load_tv})"
 
 
 class HashDict:
@@ -57,8 +72,25 @@ class HashDict:
     def __len__(self):
         return len(self.d)
 
+    def __contains__(self, k):
+        return k in self.d
+
     def items(self):
         return self.d.items()
+
+    def keys(self):
+        return self.d.keys()
+
+    def __getitem__(self, key):
+        return self.d[key]
+
+
+def string_of_d_as_args(d: dict[int, "ConsTy"]) -> str:
+    std = sorted(d.items(), key=lambda xy: xy[0])
+    bs = ""
+    for (k, v) in std:
+        bs += f"{k}:{v}, "
+    return bs
 
 
 @dataclass(frozen=False, init=False, unsafe_hash=True, eq=True)
@@ -68,6 +100,9 @@ class Record:
     def __init__(self, d) -> None:
         self.fields = HashDict(d)
         assert len(self.fields) > 0
+
+    def __repr__(self) -> str:
+        return f"rec({string_of_d_as_args(self.fields)})"
 
 
 @dataclass(frozen=False, init=False, unsafe_hash=True, eq=True)
@@ -79,6 +114,9 @@ class Func:
         self.params = HashDict(p)
         self.return_val = HashDict(r)
 
+    def __repr__(self) -> str:
+        return f"func({string_of_d_as_args(self.params)})->({string_of_d_as_args(self.return_val)})"
+
 
 ConsTy = VariableStorage | Pointer | Record | Atom | Func
 
@@ -87,11 +125,17 @@ ConsTy = VariableStorage | Pointer | Record | Atom | Func
 class FinalVar:
     ident: int
 
+    def __repr__(self) -> str:
+        return f"fv{self.ident}"
+
 
 @dataclass(frozen=True)
 class RecType:
     bound: FinalVar
     body: "ReprTy"
+
+    def __repr__(self) -> str:
+        return f"μ{self.bound}.{self.body}"
 
 
 @dataclass(frozen=True)
@@ -99,11 +143,17 @@ class Union:
     lhs: "ReprTy"
     rhs: "ReprTy"
 
+    def __repr__(self) -> str:
+        return f"{self.lhs} ⊔ {self.rhs}"
+
 
 @dataclass(frozen=True)
 class Intersection:
     lhs: "ReprTy"
     rhs: "ReprTy"
+
+    def __repr__(self) -> str:
+        return f"{self.lhs} ⊓ {self.rhs}"
 
 
 ReprTy = Pointer | Record | Atom | FinalVar | Func | Union | Intersection
@@ -142,6 +192,7 @@ class ConstraintGenerator(BaseSolver):
     def __init__(self, ty_cons: Set["TypeConstraint"]) -> None:
         super().__init__(ty_cons)
         self.base_var_map: dict[TypeVariable, ConsTy] = {}
+        self.ordered_vars: list[ConsTy] = []
         self.orig_cons = {}
         self.constrained_closed_list: Set[tuple[ConsTy, ConsTy]] = set()
         self.allocated_real_vars = 0
@@ -153,15 +204,26 @@ class ConstraintGenerator(BaseSolver):
 
         self.solve()
 
+    def dump_state(self) -> str:
+        base = str(self.base_var_map) + "\n"
+        # lst = sorted(self.base_var_map.values(), key=lambda x: id(x))
+        for v in self.ordered_vars:
+            if isinstance(v, VariableStorage):
+                base += f"{v}: "
+                base += f"{{lbs : {v.lower_bounds}, ubs: {v.upper_bounds}}}\n"
+        return base
+
     def solve_subtyping_constraints(self, constraints: Set["TypeConstraint"]):
+        print(constraints)
         self.orig_cons = constraints
         self.infer_types()
+        print(self.dump_state())
         self.solved_types = self.coalesce_types()
 
     def infer_types(self):
         for cons in self.orig_cons:
             match cons:
-                case Subtype(super_type=sty, subty=subty):
+                case Subtype(sub_type=subty, super_type=sty):
                     lhs = self.type_of(subty)
                     rhs = self.type_of(sty)
                     self.base_var_map[subty] = lhs
@@ -169,6 +231,8 @@ class ConstraintGenerator(BaseSolver):
                     self.constrain(lhs, rhs)
                 case Existence(type_=ty):
                     self.base_var_map[ty] = self.type_of(ty)
+                case _:
+                    assert False
 
     def fresh_final(self) -> FinalVar:
         res = FinalVar(self.allocated_real_vars)
@@ -176,20 +240,27 @@ class ConstraintGenerator(BaseSolver):
         return res
 
     def fresh(self) -> VariableStorage:
-        return VariableStorage(list(), list())
+        x = VariableStorage(list(), list())
+        self.ordered_vars.append(x)
+        return x
+
+    # equality
+
+    def unify(self, ty: VariableStorage, oty: ConsTy):
+        self.constrain(ty, oty)
+        self.constrain(oty, ty)
 
     def type_of(self, ty: TypeVariable, child_type=None) -> ConsTy:
-        if ty in self.base_var_map:
-            return self.base_var_map[ty]
+
+        if isinstance(ty, Atom):
+            return ty
 
         prev_ty = child_type if child_type else self.fresh()
-        ty_repr = None
         match ty:
             case DerivedTypeVariable(type_var=base_var, label=label):
-                ty_repr = prev_ty
                 match label:
                     case Load():
-                        ld = ty_repr
+                        ld = prev_ty
                         store = self.fresh()
                         self.constrain(store, ld)
                         self.type_of(base_var, child_type=Pointer(store, ld))
@@ -210,10 +281,11 @@ class ConstraintGenerator(BaseSolver):
                         self.type_of(base_var, child_type=self.fresh())
 
             case TypeVariable():
-                ty_repr = prev_ty
+                if not (ty in self.base_var_map):
+                    self.base_var_map[ty] = self.fresh()
 
-        self.base_var_map[ty] = ty_repr
-        return ty_repr
+                self.unify(self.base_var_map[ty], prev_ty)
+        return prev_ty
 
     def constrain_dict_list(self, x: dict, y: dict):
         for k in itertools.chain(x.keys(), y.keys()):
@@ -231,7 +303,7 @@ class ConstraintGenerator(BaseSolver):
             case (Atom(), Atom()):
                 # shouldnt happen but fine
                 return
-            case (Func(params=xps, return_vals=xrs), Func(params=yps, return_vals=yrs)):
+            case (Func(params=xps, return_val=xrs), Func(params=yps, return_val=yrs)):
                 self.constrain_dict_list(yps, xps)
                 self.constrain_dict_list(xrs, yrs)
             case (Record(fields=xf), Record(fields=yf)):
@@ -241,14 +313,22 @@ class ConstraintGenerator(BaseSolver):
                 self.constrain(xltv, yltv)
                 self.constrain(ystv, xstv)
             # actual subtyping
-            case (l, VariableStorage(lower_bounds=lbs, upper_bounds=ubs)):
-                lbs.append(l)
-                for x in ubs:
-                    self.constrain(l, x)
+#             case (VariableStorage(lower_bounds=lbs, upper_bounds=ubs), VariableStorage(lower_bounds=lb2, upper_bounds=ub2)):
+#                 ubs.append(rhs)
+#                 for x in lbs:
+#                     self.constrain(x, rhs)
+# #
+#                 lb2.append(lhs)
+#                 for x in ub2:
+#                     self.constrain(lhs, x)
             case (VariableStorage(lower_bounds=lbs, upper_bounds=ubs), u):
                 ubs.append(u)
                 for x in lbs:
                     self.constrain(x, u)
+            case (l, VariableStorage(lower_bounds=lbs, upper_bounds=ubs)):
+                lbs.append(l)
+                for x in ubs:
+                    self.constrain(l, x)
 
     @staticmethod
     def map_value(f: Callable[[V], V2], d: dict[K, V]) -> dict[K, V2]:
@@ -265,6 +345,10 @@ class ConstraintGenerator(BaseSolver):
         return ConstraintGenerator.get_or_insert(vstor, lambda: self.fresh_final(), self.vstor_to_final_var)
 
     def coalesce_acc(self, ty: ConsTy, processing: frozenset[PolarVariable],  is_pos: bool) -> ReprTy:
+        print(ty)
+        print(processing)
+        print(is_pos)
+        print("----")
         rec_pos = partial(self.coalesce_acc,
                           processing=processing, is_pos=is_pos)
         rec_neg = partial(self.coalesce_acc,
@@ -272,7 +356,7 @@ class ConstraintGenerator(BaseSolver):
         match ty:
             case Atom(name=aty):
                 return Atom(aty)
-            case Func(params=prs, return_vals=rets):
+            case Func(params=prs, return_val=rets):
                 return Func(ConstraintGenerator.map_value(rec_neg, prs), ConstraintGenerator.map_value(rec_pos, rets))
             case Record(fields=fs):
                 return Record(ConstraintGenerator.map_value(rec_pos, fs))
@@ -281,6 +365,7 @@ class ConstraintGenerator(BaseSolver):
             case VariableStorage(lower_bounds=lbs, upper_bounds=ubs):
                 polar_v = PolarVariable(ty, Polarity.from_bool(is_pos))
                 if polar_v in processing:
+                    print("Curr processing")
                     return ConstraintGenerator.get_or_insert(polar_v, lambda: self.fresh_final(), self.recursive_polar_types)
                 else:
                     vs = self.final_var_for_variable(ty)
@@ -292,6 +377,8 @@ class ConstraintGenerator(BaseSolver):
                         return RecType(self.recursive_polar_types[polar_v], res_ty)
                     else:
                         return res_ty
+        print(ty)
+        print(type(ty))
         assert False
 
     def coalesce(self, ty: ConsTy) -> ReprTy:
@@ -301,6 +388,7 @@ class ConstraintGenerator(BaseSolver):
         tot = dict()
         for (k, v) in self.base_var_map.items():
             if isinstance(k, TypeVariable):
+                print(f"Coalescing: {k}")
                 tot[k] = self.coalesce(v)
         return tot
 
