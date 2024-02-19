@@ -7,7 +7,6 @@ from .simple_solver import BaseSolver
 from enum import Enum
 from functools import partial, reduce
 import copy
-
 import itertools
 
 # Import labels
@@ -17,23 +16,136 @@ from typing import TypeVar, Callable, Optional
 # A type variable is a unique holder of constraints
 
 
-# we give vstorage identity based
-@dataclass(eq=False, init=False)
-class VariableStorage:
-    lower_bounds: list["ConsTy"]
-    upper_bounds: list["ConsTy"]
-    id: int
+class DisjointSet:
+    """
+    Copyright (c) 2001-2002 Enthought, Inc. 2003-2024, SciPy Developers.
+    All rights reserved.
+    """
 
+    def __init__(self, elements=None):
+        self.n_subsets = 0
+        self._sizes = {}
+        self._parents = {}
+        # _nbrs is a circular linked list which links connected elements.
+        self._nbrs = {}
+        # _indices tracks the element insertion order in `__iter__`.
+        self._indices = {}
+        if elements is not None:
+            for x in elements:
+                self.add(x)
+
+    def __iter__(self):
+        return iter(self._indices)
+
+    def __len__(self):
+        return len(self._indices)
+
+    def __contains__(self, x):
+        return x in self._indices
+
+    def __getitem__(self, x):
+        if x not in self._indices:
+            raise KeyError(x)
+
+        # find by "path halving"
+        parents = self._parents
+        while self._indices[x] != self._indices[parents[x]]:
+            parents[x] = parents[parents[x]]
+            x = parents[x]
+        return x
+
+    def add(self, x):
+        if x in self._indices:
+            return
+
+        self._sizes[x] = 1
+        self._parents[x] = x
+        self._nbrs[x] = x
+        self._indices[x] = len(self._indices)
+        self.n_subsets += 1
+
+    def merge(self, x, y, can_swap=True):
+        print(can_swap)
+        xr = self[x]
+        yr = self[y]
+        if self._indices[xr] == self._indices[yr]:
+            return False
+
+        sizes = self._sizes
+        if ((sizes[xr], self._indices[yr]) < (sizes[yr], self._indices[xr])) and can_swap:
+            xr, yr = yr, xr
+        self._parents[yr] = xr
+        self._sizes[xr] += self._sizes[yr]
+        self._nbrs[xr], self._nbrs[yr] = self._nbrs[yr], self._nbrs[xr]
+        self.n_subsets -= 1
+        return True
+
+    def connected(self, x, y):
+        return self._indices[self[x]] == self._indices[self[y]]
+
+    def subset(self, x):
+        if x not in self._indices:
+            raise KeyError(x)
+
+        result = [x]
+        nxt = self._nbrs[x]
+        while self._indices[nxt] != self._indices[x]:
+            result.append(nxt)
+            nxt = self._nbrs[nxt]
+        return set(result)
+
+    def subset_size(self, x):
+        return self._sizes[self[x]]
+
+    def subsets(self):
+        result = []
+        visited = set()
+        for x in self:
+            if x not in visited:
+                xset = self.subset(x)
+                visited.update(xset)
+                result.append(xset)
+        return result
+
+
+# we give vstorage identity based
+class VariableStorage:
+    all_mems = []
     tot_ids = 0
 
-    def __init__(self, lbs, ubs) -> None:
-        self.lower_bounds = lbs
-        self.upper_bounds = ubs
+    def __init__(self) -> None:
+        self.lower_bounds = []
+        self.upper_bounds = []
         self.id = VariableStorage.tot_ids
         VariableStorage.tot_ids += 1
+        VariableStorage.all_mems.append(self)
+
+    def add_ub(self, c):
+        # if isinstance(c, VariableStorage):
+        #    assert c.id != self.id
+        self.upper_bounds.append(c)
+
+    def add_lb(self, c):
+        # if isinstance(c, VariableStorage):
+        #    assert c.id != self.id
+        self.lower_bounds.append(c)
 
     def __repr__(self) -> str:
         return f"vstr{self.id}"
+
+    def __hash__(self) -> int:
+        return self.id
+
+    def __eq__(self, __value: object) -> bool:
+        return isinstance(__value, VariableStorage) and self.id == __value.id
+
+    # we are careful to preserve eq and hash accross mutability here
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo):
+        return self
 
 
 @dataclass(frozen=True)
@@ -188,75 +300,131 @@ class PolarVariable:
     polar: Polarity
 
 
-class ConstraintGenerator(BaseSolver):
-    def __init__(self, ty_cons: Set["TypeConstraint"]) -> None:
-        super().__init__(ty_cons)
-        self.base_var_map: dict[TypeVariable, ConsTy] = {}
-        self.ordered_vars: list[ConsTy] = []
-        self.orig_cons = {}
-        self.constrained_closed_list: Set[tuple[ConsTy, ConsTy]] = set()
+class VariableHandler:
+    def __init__(self) -> None:
         self.allocated_real_vars = 0
-        # it's safe to keep recursive type variables global. if it was made recursive once it's always recursive
-        # the tricky bit is processing has to pick it up immutably
-        self.recursive_polar_types: dict[PolarVariable, FinalVar] = dict()
-        self.vstor_to_final_var: dict[VariableStorage, FinalVar] = dict()
-        self.solved_types = {}
-        self.solve_subtyping_constraints(self._constraints)
-
-    def dump_state(self) -> str:
-        base = str(self.base_var_map) + "\n"
-        # lst = sorted(self.base_var_map.values(), key=lambda x: id(x))
-        for v in self.ordered_vars:
-            if isinstance(v, VariableStorage):
-                base += f"{v}: "
-                base += f"{{lbs : {v.lower_bounds}, ubs: {v.upper_bounds}}}\n"
-        return base
-
-    def solve_subtyping_constraints(self, constraints: Set["TypeConstraint"]):
-        print(constraints)
-        self.orig_cons = constraints
-        self.infer_types()
-        print(self.dump_state())
-        self.solved_types = self.coalesce_types()
-
-    def infer_types(self):
-        for (f, cons_set) in self.orig_cons.items():
-            for cons in cons_set:
-                match cons:
-                    case Subtype(sub_type=subty, super_type=sty):
-                        lhs = self.type_of(subty)
-                        rhs = self.type_of(sty)
-                        self.base_var_map[subty] = lhs
-                        self.base_var_map[sty] = rhs
-                        self.constrain(lhs, rhs)
-                    case Existence(type_=ty):
-                        self.base_var_map[ty] = self.type_of(ty)
-                    case _:
-                        assert False
 
     def fresh_final(self) -> FinalVar:
         res = FinalVar(self.allocated_real_vars)
         self.allocated_real_vars += 1
         return res
 
-    def fresh(self) -> VariableStorage:
-        x = VariableStorage(list(), list())
-        self.ordered_vars.append(x)
-        return x
 
-    # equality
+class UnificationPass:
+    """
+    The unifier takes subtyping constraints and produces a unified set of type variables + constraints
+    that represent the subtyping relation
+    """
 
-    def unify(self, ty: VariableStorage, oty: ConsTy):
-        self.constrain(ty, oty)
-        self.constrain(oty, ty)
+    def __init__(self) -> None:
+        super().__init__()
+        self.constraints: list[tuple[ReprTy, ReprTy]] = []
+        self.base_var_map: dict[TypeVariable, ConsTy] = {}
+        self.type_classes = DisjointSet()
+
+    def constrain(self, x, y):
+        self.constraints.append((x, y))
+
+    def build_base_vars(self) -> dict[TypeVariable, ConsTy]:
+        return dict([(k, self.render(v)) for k, v in self.base_var_map.items()])
+
+    def build_constraints(self) -> list[tuple[ReprTy, ReprTy]]:
+        return [(self.render(x), self.render(y)) for x, y in self.constraints]
+
+    def render(self, r: ReprTy) -> ConsTy:
+        """
+        Produces a base var map and constraints in terms of vstore variables. For each type both in constraints
+        and base vars, if it's a proper type, build the constructor, if the type is not a proper type, get  a vstore.
+
+        There is a single vstore per.
+        """
+        rep = self.type_classes[r]
+        if isinstance(rep, VariableStorage):
+            return rep
+
+        def get_repr_list(mp: HashDict) -> HashDict:
+            d = {}
+            for k, v in mp.items():
+                d[k] = self.render(v)
+            return HashDict(d)
+
+        match rep:
+            case Atom():
+                # shouldnt happen but fine
+                return r
+            case Func(params=xps, return_val=xrs):
+                return Func(get_repr_list(xps), get_repr_list(xrs))
+            case Record(fields=xf):
+                return Record(get_repr_list(xf))
+            # covariant on the load and contravariant on the store
+            case Pointer(store_tv=ystv, load_tv=yltv):
+                return Pointer(self.render(ystv), self.render(yltv))
+        print(rep)
+        assert False
+
+    def unify(self, ty1: ReprTy, ty2: ReprTy, can_swap=True):
+        print(f"Unify {ty1} {ty2}")
+        self.type_classes.add(ty1)
+        self.type_classes.add(ty2)
+
+        x = self.type_classes[ty1]
+        y = self.type_classes[ty2]
+        print(x)
+        print(y)
+        if isinstance(x, VariableStorage):
+            self.type_classes.merge(
+                y, x, can_swap=isinstance(y, VariableStorage) and can_swap)
+            return
+
+        if isinstance(y, VariableStorage):
+            self.type_classes.merge(
+                x, y, can_swap=isinstance(x, VariableStorage) and can_swap)
+            return
+
+        self.type_classes.merge(x, y, can_swap=can_swap)
+
+        def unify_dict_list(xit, yit):
+            dlist_new = {}
+            for k in itertools.chain(xit.keys(), yit.keys()):
+                if k in x and k in y:
+                    self.unify(x[k], y[k])
+
+                if k in x:
+                    dlist_new[k] = x[k]
+                else:
+                    dlist_new[k] = y[k]
+            return HashDict(dlist_new)
+
+        match (x, y):
+            case (Atom(), Atom()):
+                # shouldnt happen but fine
+                return
+            case (Func(params=xps, return_val=xrs), Func(params=yps, return_val=yrs)):
+                ins = unify_dict_list(xps, yps)
+                outs = unify_dict_list(xrs, yrs)
+                self.type_classes.merge(Func(ins, outs), x, can_swap=False)
+            case (Record(fields=xf), Record(fields=yf)):
+                nf = unify_dict_list(xf, yf)
+                self.type_classes.merge(Record(nf), x, can_swap=False)
+            # covariant on the load and contravariant on the store
+            case (Pointer(store_tv=xstv, load_tv=xltv), Pointer(store_tv=ystv, load_tv=yltv)):
+                self.unify(xstv, ystv)
+                self.unify(xltv, yltv)
 
     def type_of_labels(self, rst: Iterator[BaseLabel]) -> tuple[ConsTy, VariableStorage]:
         elem = next(rst, None)
         if elem:
-            return self.handle_label(elem, rst)
+            (pty, storage) = self.handle_label(elem, rst)
+            self.type_classes.add(pty)
+            return (pty, storage)
         else:
             nty = self.fresh()
             return (nty, nty)
+
+    def fresh(self) -> VariableStorage:
+        vstr = VariableStorage()
+        self.type_classes.add(vstr)
+        return vstr
 
     def handle_label(self, label: BaseLabel, rst: Iterator[BaseLabel]) -> tuple[Optional[ConsTy], VariableStorage]:
         (prev_ty, storage) = self.type_of_labels(rst)
@@ -294,12 +462,72 @@ class ConstraintGenerator(BaseSolver):
             case DerivedTypeVariable(type_var=base_var, labels=label):
                 v = get_ty_var(base_var)
                 (lb_ty, storage) = self.type_of_labels(iter(label))
-                self.unify(v, lb_ty)
+                self.unify(lb_ty, v)
+                print(f"Curr value: {self.type_classes[get_ty_var(base_var)]}")
+                assert storage is not None
                 return storage
             case TypeVariable():
                 return get_ty_var(ty)
             case _:
                 assert False
+
+
+class ConstraintGenerator(BaseSolver, VariableHandler):
+    def __init__(self, ty_cons: Set["TypeConstraint"]) -> None:
+        super().__init__(ty_cons)
+        self.base_var_map: dict[TypeVariable, ConsTy] = {}
+        self.ordered_vars: list[ConsTy] = []
+        self.orig_cons = {}
+        self.constrained_closed_list: Set[tuple[ConsTy, ConsTy]] = set()
+        self.allocated_real_vars = 0
+        # it's safe to keep recursive type variables global. if it was made recursive once it's always recursive
+        # the tricky bit is processing has to pick it up immutably
+        self.recursive_polar_types: dict[PolarVariable, FinalVar] = dict()
+        self.vstor_to_final_var: dict[VariableStorage, FinalVar] = dict()
+        self.solved_types = {}
+        self.solve_subtyping_constraints(self._constraints)
+
+    def dump_state(self) -> str:
+        base = str(self.base_var_map) + "\n"
+        # lst = sorted(self.base_var_map.values(), key=lambda x: id(x))
+        for v in VariableStorage.all_mems:
+            if isinstance(v, VariableStorage):
+                base += str(v.id) + " :"
+                base += f"{v}: "
+                base += f"{{lbs : {v.lower_bounds}, ubs: {v.upper_bounds}}}\n"
+        return base
+
+    def solve_subtyping_constraints(self, constraints: Set["TypeConstraint"]):
+        print(constraints)
+        self.orig_cons = constraints
+        self.infer_types()
+        print(self.dump_state())
+        self.solved_types = self.coalesce_types()
+
+    def infer_types(self):
+        uf = UnificationPass()
+        for (f, cons_set) in self.orig_cons.items():
+            for cons in cons_set:
+                match cons:
+                    case Subtype(sub_type=subty, super_type=sty):
+                        uf.constrain(uf.type_of(subty), uf.type_of(sty))
+                    case Existence(type_=ty):
+                        uf.type_of(ty)
+                    case _:
+                        assert False
+
+        self.base_var_map = uf.build_base_vars()
+        print(self.base_var_map)
+        for (lhs, rhs) in uf.build_constraints():
+            print(f"{lhs} <= {rhs}")
+            self.constrain(lhs, rhs)
+
+    def fresh(self) -> VariableStorage:
+        x = VariableStorage(list(), list())
+        self.ordered_vars.append(x)
+        return x
+
+    # equality
 
     def constrain_dict_list(self, x: dict, y: dict):
         for k in itertools.chain(x.keys(), y.keys()):
@@ -308,6 +536,7 @@ class ConstraintGenerator(BaseSolver):
 
     def constrain(self, lhs: ConsTy, rhs: ConsTy):
         tup = (lhs, rhs)
+        print(tup)
         if tup in self.constrained_closed_list:
             return
 
@@ -336,11 +565,11 @@ class ConstraintGenerator(BaseSolver):
 #                 for x in ub2:
 #                     self.constrain(lhs, x)
             case (VariableStorage(lower_bounds=lbs, upper_bounds=ubs), u):
-                ubs.append(u)
+                lhs.add_ub(u)
                 for x in lbs:
                     self.constrain(x, u)
             case (l, VariableStorage(lower_bounds=lbs, upper_bounds=ubs)):
-                lbs.append(l)
+                rhs.add_lb(l)
                 for x in ubs:
                     self.constrain(l, x)
 
@@ -359,10 +588,18 @@ class ConstraintGenerator(BaseSolver):
         return ConstraintGenerator.get_or_insert(vstor, lambda: self.fresh_final(), self.vstor_to_final_var)
 
     def coalesce_acc(self, ty: ConsTy, processing: frozenset[PolarVariable],  is_pos: bool) -> ReprTy:
+        print("<st>--")
         print(ty)
         print(processing)
         print(is_pos)
-        print("----")
+        if isinstance(ty, VariableStorage):
+            print(ty.upper_bounds)
+            print(ty.lower_bounds)
+            orig = VariableStorage.all_mems[ty.id]
+            print(id(ty))
+            print(id(orig))
+            print(orig.upper_bounds)
+        print("<end>----")
         rec_pos = partial(self.coalesce_acc,
                           processing=processing, is_pos=is_pos)
         rec_neg = partial(self.coalesce_acc,
@@ -378,15 +615,29 @@ class ConstraintGenerator(BaseSolver):
                 return Pointer(rec_neg(stv), rec_pos(lv))
             case VariableStorage(lower_bounds=lbs, upper_bounds=ubs):
                 polar_v = PolarVariable(ty, Polarity.from_bool(is_pos))
+                print(f"Currently in {polar_v}")
+                print(ty.lower_bounds)
+                print(ty.upper_bounds)
+                print(lbs)
+                print(ubs)
+                print(ty)
+                print(ty.id)
                 if polar_v in processing:
                     print("Curr processing")
+                    print(self.dump_state())
                     return ConstraintGenerator.get_or_insert(polar_v, lambda: self.fresh_final(), self.recursive_polar_types)
                 else:
                     vs = self.final_var_for_variable(ty)
+                    if is_pos:
+                        print(lbs)
+                    else:
+                        print(ubs)
                     curr_bounds = map(partial(
                         self.coalesce_acc, processing=processing.union([polar_v]), is_pos=is_pos), (lbs if is_pos else ubs))
                     mrg = Union if is_pos else Intersection
                     res_ty = reduce(mrg, curr_bounds, vs)
+                    print(res_ty)
+                    print(f"Done recurring for {polar_v}")
                     if polar_v in self.recursive_polar_types:
                         return RecType(self.recursive_polar_types[polar_v], res_ty)
                     else:
