@@ -8,6 +8,7 @@ from enum import Enum
 from functools import partial, reduce
 import copy
 import itertools
+from pyrsistent import m, pmap, PMap
 
 # Import labels
 from .typevars import FuncIn, FuncOut, Load, Store, ConvertTo, HasField, BaseLabel
@@ -587,67 +588,60 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
     def final_var_for_variable(self, vstor: VariableStorage) -> FinalVar:
         return ConstraintGenerator.get_or_insert(vstor, lambda: self.fresh_final(), self.vstor_to_final_var)
 
-    def coalesce_acc(self, ty: ConsTy, processing: frozenset[PolarVariable],  is_pos: bool) -> ReprTy:
-        print("<st>--")
-        print(ty)
-        print(processing)
-        print(is_pos)
-        if isinstance(ty, VariableStorage):
-            print(ty.upper_bounds)
-            print(ty.lower_bounds)
-            orig = VariableStorage.all_mems[ty.id]
-            print(id(ty))
-            print(id(orig))
-            print(orig.upper_bounds)
-        print("<end>----")
+    def coalesce_acc(self, ty: ConsTy, processing: PMap[(ConsTy, Polarity), Callable[[], FinalVar]],  is_pos: bool) -> ReprTy:
+
+        if ty in processing:
+            return processing[ty]()
+
+        is_recursive = False
+        vcache = None
+
+        def variable_for_type():
+            nonlocal is_recursive
+            nonlocal vcache
+
+            if vcache:
+                return vcache
+            is_recursive = True
+            if isinstance(ty, VariableStorage):
+                vcache = self.final_var_for_variable(ty)
+            else:
+                vcache = self.fresh_final()
+            return vcache
+
+        next_processing = processing.set(ty, variable_for_type)
+
         rec_pos = partial(self.coalesce_acc,
-                          processing=processing, is_pos=is_pos)
+                          processing=next_processing, is_pos=is_pos)
         rec_neg = partial(self.coalesce_acc,
-                          processing=processing, is_pos=(not is_pos))
-        match ty:
-            case Atom(name=aty):
-                return Atom(aty)
-            case Func(params=prs, return_val=rets):
-                return Func(ConstraintGenerator.map_value(rec_neg, prs), ConstraintGenerator.map_value(rec_pos, rets))
-            case Record(fields=fs):
-                return Record(ConstraintGenerator.map_value(rec_pos, fs))
-            case Pointer(store_tv=stv, load_tv=lv):
-                return Pointer(rec_neg(stv), rec_pos(lv))
-            case VariableStorage(lower_bounds=lbs, upper_bounds=ubs):
-                polar_v = PolarVariable(ty, Polarity.from_bool(is_pos))
-                print(f"Currently in {polar_v}")
-                print(ty.lower_bounds)
-                print(ty.upper_bounds)
-                print(lbs)
-                print(ubs)
-                print(ty)
-                print(ty.id)
-                if polar_v in processing:
-                    print("Curr processing")
-                    print(self.dump_state())
-                    return ConstraintGenerator.get_or_insert(polar_v, lambda: self.fresh_final(), self.recursive_polar_types)
-                else:
+                          processing=next_processing, is_pos=(not is_pos))
+
+        def go():
+            match ty:
+                case Atom(name=aty):
+                    return Atom(aty)
+                case Func(params=prs, return_val=rets):
+                    return Func(ConstraintGenerator.map_value(rec_neg, prs), ConstraintGenerator.map_value(rec_pos, rets))
+                case Record(fields=fs):
+                    return Record(ConstraintGenerator.map_value(rec_pos, fs))
+                case Pointer(store_tv=stv, load_tv=lv):
+                    return Pointer(rec_neg(stv), rec_pos(lv))
+                case VariableStorage(lower_bounds=lbs, upper_bounds=ubs):
                     vs = self.final_var_for_variable(ty)
-                    if is_pos:
-                        print(lbs)
-                    else:
-                        print(ubs)
                     curr_bounds = map(partial(
-                        self.coalesce_acc, processing=processing.union([polar_v]), is_pos=is_pos), (lbs if is_pos else ubs))
+                        self.coalesce_acc, processing=next_processing, is_pos=is_pos), (lbs if is_pos else ubs))
                     mrg = Union if is_pos else Intersection
                     res_ty = reduce(mrg, curr_bounds, vs)
-                    print(res_ty)
-                    print(f"Done recurring for {polar_v}")
-                    if polar_v in self.recursive_polar_types:
-                        return RecType(self.recursive_polar_types[polar_v], res_ty)
-                    else:
-                        return res_ty
-        print(ty)
-        print(type(ty))
-        assert False
+                    return res_ty
+            assert False
+        res_ty = go()
+        if is_recursive:
+            return RecType(variable_for_type(), res_ty)
+        else:
+            return res_ty
 
     def coalesce(self, ty: ConsTy) -> ReprTy:
-        return self.coalesce_acc(ty, frozenset(), True)
+        return self.coalesce_acc(ty, pmap(), True)
 
     def coalesce_types(self) -> dict[TypeVariable, ReprTy]:
         tot = dict()
