@@ -8,6 +8,8 @@ __package__ = __package__ or "tests.analyses"  # pylint:disable=redefined-builti
 import os
 import unittest
 
+
+from pyrsistent import pmap
 import angr
 from angr.analyses.typehoon.typevars import (
     TypeVariable,
@@ -69,10 +71,16 @@ class TestTypehoon(unittest.TestCase):
         print(solved.solved_types)
         for s in [v for (k, v) in vr.var_to_typevars.items() if k.name == "s_10"]:
             for tv in s:
-                print(tv)
-                if tv in solved.solved_types:
-                    print(tv)
-                    print(solved.solved_types[tv])
+                print("Have target tv:", tv)
+                print(solved.base_var_map)
+                if tv in solved.base_var_map:
+                    print(solved.base_var_map[tv])
+                    ty = solved.coalesce_acc(
+                        solved.base_var_map[tv], pmap(), False)
+                    print("Coalesced:", ty)
+                    opt = Optimizer()
+                    # print(solved.solved_types[tv])
+                    print("Optimized", opt.optimize_ty(ty, False))
         assert False
 
     def test_smoketest(self):

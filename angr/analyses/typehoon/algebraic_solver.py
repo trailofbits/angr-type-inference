@@ -10,6 +10,7 @@ import copy
 import itertools
 from pyrsistent import m, pmap, PMap
 from collections import defaultdict
+from .typeconsts import TopType as TypehoonTop, BottomType as TypehoonBot, Int as TypehoonInt, FloatBase as TypehoonFloat
 
 # Import labels
 from .typevars import FuncIn, FuncOut, Load, Store, ConvertTo, HasField, BaseLabel
@@ -67,7 +68,6 @@ class DisjointSet:
         self.n_subsets += 1
 
     def merge(self, x, y, can_swap=True):
-        print(can_swap)
         xr = self[x]
         yr = self[y]
         if self._indices[xr] == self._indices[yr]:
@@ -350,7 +350,7 @@ class UnificationPass:
 
         There is a single vstore per.
         """
-        rep = self.type_classes[r]
+        rep = self.safe_get(r)
         if isinstance(rep, VariableStorage):
             return rep
 
@@ -362,7 +362,10 @@ class UnificationPass:
 
         match rep:
             case Atom():
-                # shouldnt happen but fine
+                return r
+            case Top():
+                return r
+            case Bottom():
                 return r
             case Func(params=xps, return_val=xrs):
                 return Func(get_repr_list(xps), get_repr_list(xrs))
@@ -374,15 +377,16 @@ class UnificationPass:
         print(rep)
         assert False
 
+    def safe_get(self, ty1: ReprTy):
+        self.type_classes.add(ty1)
+        return self.type_classes[ty1]
+
     def unify(self, ty1: ReprTy, ty2: ReprTy, can_swap=True):
-        print(f"Unify {ty1} {ty2}")
         self.type_classes.add(ty1)
         self.type_classes.add(ty2)
 
         x = self.type_classes[ty1]
         y = self.type_classes[ty2]
-        print(x)
-        print(y)
         if isinstance(x, VariableStorage):
             self.type_classes.merge(
                 y, x, can_swap=isinstance(y, VariableStorage) and can_swap)
@@ -398,13 +402,13 @@ class UnificationPass:
         def unify_dict_list(xit, yit):
             dlist_new = {}
             for k in itertools.chain(xit.keys(), yit.keys()):
-                if k in x and k in y:
-                    self.unify(x[k], y[k])
+                if k in xit and k in yit:
+                    self.unify(xit[k], yit[k])
 
-                if k in x:
-                    dlist_new[k] = x[k]
+                if k in xit:
+                    dlist_new[k] = xit[k]
                 else:
-                    dlist_new[k] = y[k]
+                    dlist_new[k] = yit[k]
             return HashDict(dlist_new)
 
         match (x, y):
@@ -467,6 +471,7 @@ class UnificationPass:
 
         def get_ty_var(bv: TypeVariable) -> VariableStorage:
             if not (bv in self.base_var_map):
+                print("Injecting ", bv)
                 self.base_var_map[bv] = self.fresh()
             return self.base_var_map[bv]
 
@@ -475,12 +480,20 @@ class UnificationPass:
                 v = get_ty_var(base_var)
                 (lb_ty, storage) = self.type_of_labels(iter(label))
                 self.unify(lb_ty, v)
-                print(f"Curr value: {self.type_classes[get_ty_var(base_var)]}")
                 assert storage is not None
                 return storage
             case TypeVariable():
                 return get_ty_var(ty)
+            case TypehoonBot():
+                return Bottom()
+            case TypehoonTop():
+                return Top()
+            case TypehoonFloat():
+                return Atom(str(ty))
+            case TypehoonInt():
+                return Atom(str(ty))
             case _:
+                print(ty)
                 assert False
 
 
@@ -510,7 +523,6 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
         return base
 
     def solve_subtyping_constraints(self, constraints: Set["TypeConstraint"]):
-        print(constraints)
         self.orig_cons = constraints
         self.infer_types()
         print(self.dump_state())
@@ -529,9 +541,10 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
                         assert False
 
         self.base_var_map = uf.build_base_vars()
-        print(self.base_var_map)
+        for (eq, to) in self._equivalence.items():
+            self.base_var_map[eq] = self.base_var_map[to]
+
         for (lhs, rhs) in uf.build_constraints():
-            print(f"{lhs} <= {rhs}")
             self.constrain(lhs, rhs)
 
     def fresh(self) -> VariableStorage:
@@ -548,7 +561,6 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
 
     def constrain(self, lhs: ConsTy, rhs: ConsTy):
         tup = (lhs, rhs)
-        print(tup)
         if tup in self.constrained_closed_list:
             return
 
@@ -629,6 +641,10 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
 
         def go():
             match ty:
+                case Top():
+                    return ty
+                case Bottom():
+                    return ty
                 case Atom(name=aty):
                     return Atom(aty)
                 case Func(params=prs, return_val=rets):
@@ -658,9 +674,14 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
         tot = dict()
         for k in self.orig_cons.keys():
             if isinstance(k, TypeVariable):
-                print(f"Coalescing: {k}")
-                tot[k] = self.coalesce(self.base_var_map[k])
+                if k in self.base_var_map:
+                    tot[k] = self.coalesce(self.base_var_map[k])
         return tot
+
+
+class TypePrinter:
+    def __init__(self) -> None:
+        pass
 
 
 class Optimizer:
@@ -678,10 +699,10 @@ class Optimizer:
         self.rec_vars = set()
         self.removable_vars = set()
 
-    def optimize_ty(self, r: ReprTy):
-        self.walk_type(r, True)
+    def optimize_ty(self, r: ReprTy, polarity=True):
+        self.walk_type(r, polarity)
         self.collect_indistinguishable()
-        return self.rewrite_type(r, True)
+        return self.rewrite_type(r, polarity)
 
     def safe_merge(self, v1, v2):
         self.uf.add(v1)
@@ -751,6 +772,8 @@ class Optimizer:
             return reduce(cls, s)
 
         match r:
+            case Top() | Bottom() | Atom():
+                return r
             case RecType(bound=bnd, body=bdy):
                 return RecType(bnd, rewrite_pos(bdy))
             case Pointer(store_tv=stv, load_tv=ltv):
@@ -787,6 +810,8 @@ class Optimizer:
                 w(v)
 
         match r:
+            case Top() | Bottom() | Atom():
+                return
             case RecType(bound=bnd, body=bdy):
                 self.rec_vars.add(bnd)
                 self.walk_type(bdy, polar)
