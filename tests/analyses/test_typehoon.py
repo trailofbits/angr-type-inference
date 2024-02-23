@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # pylint:disable=missing-class-docstring,no-self-use
 from angr.angrdb import AngrDB
-from angr.analyses.typehoon.algebraic_solver import ConstraintGenerator, Atom
+from angr.analyses.typehoon.algebraic_solver import ConstraintGenerator, Atom, Optimizer
 from angr.analyses.typehoon.typevars import TypeConstraint, Subtype, Load, HasField, TypeVariable, DerivedTypeVariable, FuncIn
 __package__ = __package__ or "tests.analyses"  # pylint:disable=redefined-builtin
 
@@ -47,6 +47,9 @@ class TestTypehoon(unittest.TestCase):
         print("tys: ")
         print(solved.base_var_map)
         print(solved.solved_types)
+        for ty in solved.solved_types.values():
+            opt = Optimizer()
+            print(opt.optimize_ty(ty))
         assert False
 
     def test_mooosl(self):
