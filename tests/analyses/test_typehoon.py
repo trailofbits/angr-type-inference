@@ -2,6 +2,7 @@
 # pylint:disable=missing-class-docstring,no-self-use
 from angr.angrdb import AngrDB
 from angr.analyses.typehoon.algebraic_solver import ConstraintGenerator, Atom, Optimizer
+from angr.analyses.typehoon import algebraic_solver
 from angr.analyses.typehoon.typevars import TypeConstraint, Subtype, Load, HasField, TypeVariable, DerivedTypeVariable, FuncIn
 __package__ = __package__ or "tests.analyses"  # pylint:disable=redefined-builtin
 
@@ -80,7 +81,10 @@ class TestTypehoon(unittest.TestCase):
                     print("Coalesced:", ty)
                     opt = Optimizer()
                     # print(solved.solved_types[tv])
-                    print("Optimized", opt.optimize_ty(ty, False))
+                    optimized = opt.optimize_ty(ty, False)
+                    print("Optimized: ", optimized)
+                    print("Evaled: ", algebraic_solver.evaluate_type(
+                        optimized))
         assert False
 
     def test_smoketest(self):
