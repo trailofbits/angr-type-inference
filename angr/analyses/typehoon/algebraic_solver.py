@@ -1,5 +1,8 @@
 
 
+from typing import TypeVar
+from abc import abstractmethod, abstractstaticmethod
+from abc import ABC
 from dataclasses import dataclass
 from typing import Set, Iterator, Optional, Any
 from .typevars import Existence, Subtype, TypeVariable, DerivedTypeVariable, TypeConstraint
@@ -8,14 +11,14 @@ from enum import Enum
 from functools import partial, reduce
 import copy
 import itertools
-from pyrsistent import m, pmap, PMap
+from pyrsistent import m, pmap, PMap, pset, PSet
 from collections import defaultdict
 from .typeconsts import TopType as TypehoonTop, BottomType as TypehoonBot, Int as TypehoonInt, FloatBase as TypehoonFloat
-
+import networkx as nx
 # Import labels
 from .typevars import FuncIn, FuncOut, Load, Store, ConvertTo, HasField, BaseLabel
 from typing import TypeVar, Callable, Optional
-
+from collections import deque
 # A type variable is a unique holder of constraints
 
 
@@ -212,10 +215,10 @@ def string_of_d_as_args(d: dict[int, "ConsTy"]) -> str:
 
 @dataclass(frozen=False, init=False, unsafe_hash=True, eq=True)
 class Record:
-    fields: dict[int, "ConsTy"]
+    fields: PMap[int, "ConsTy"]
 
     def __init__(self, d) -> None:
-        self.fields = HashDict(d)
+        self.fields = pmap(d)
         # (self.fields) > 0
 
     def __repr__(self) -> str:
@@ -224,12 +227,12 @@ class Record:
 
 @dataclass(frozen=False, init=False, unsafe_hash=True, eq=True)
 class Func:
-    params: dict[int, "ConsTy"]
-    return_val: dict[int, "ConsTy"]
+    params: PMap[int, "ConsTy"]
+    return_val: PMap[int, "ConsTy"]
 
     def __init__(self, p, r) -> None:
-        self.params = HashDict(p)
-        self.return_val = HashDict(r)
+        self.params = pmap(p)
+        self.return_val = pmap(r)
 
     def __repr__(self) -> str:
         return f"func({string_of_d_as_args(self.params)})->({string_of_d_as_args(self.return_val)})"
@@ -862,6 +865,359 @@ def evaluate_type_acc(r1: ReprTy, rec_vars: set[FinalVar]):
         case _:
             print(type(r1))
             assert False
+
+
+@dataclass(frozen=True)
+class ConstructorID:
+    ind: int
+
+
+class Constructor(ABC):
+    @property
+    @abstractmethod
+    def ident() -> ConstructorID:
+        pass
+
+    @abstractmethod
+    def join(self, o: "Constructor") -> "Constructor":
+        pass
+
+    @abstractmethod
+    def meet(self, o: "Constructor") -> "Constructor":
+        pass
+
+    @abstractmethod
+    def geq(self, o: "Constructor") -> "Constructor":
+        pass
+
+
+@dataclass(frozen=True)
+class FVCons(Constructor):
+    representing: PSet[FinalVar]
+
+    def join(self, o: "FVCons") -> "FVCons":
+        return FVCons(self.representing.intersection(o))
+
+    def meet(self, o: "FVCons") -> "FVCons":
+        return FVCons(self.representing.union(o))
+
+    def geq(self, o: "FVCons") -> bool:
+        return self.representing.issubset(o)
+
+
+@dataclass(frozen=True)
+class RecCons(Constructor):
+    fields: PSet[int]
+
+    def join(self, o: "RecCons") -> "RecCons":
+        # contra on params
+        return RecCons(self.fields.intersection(o.fields))
+
+    def meet(self, o: "RecCons") -> "RecCons":
+        return RecCons(self.fields.union(o.fields))
+
+    def geq(self, o: "FVCons") -> bool:
+        return self.fields.issubset(o)
+
+
+@dataclass
+class PointerCons(Constructor):
+    def join(self, o: "PointerCons") -> "PointerCons":
+        return self
+
+    def meet(self, o: "PointerCons") -> "PointerCons":
+        return self
+
+    def geq(self, o: "PointerCons") -> bool:
+        return True
+
+
+@dataclass
+class AtomicType(Constructor):
+    atom: Atom | Top | Bottom
+
+    def join(self, o: "AtomicType") -> "AtomicType":
+        match (self.atom, o.atom):
+            case (Top(), _) | (_, Top()):
+                return Atom(Top())
+            case (x, Bottom()):
+                return Atom(x)
+            case (Bottom(), x):
+                return Atom(x)
+            case (Atom(), Atom()):
+                raise NotImplementedError
+
+    def meet(self, o: "AtomicType") -> "AtomicType":
+        return RecCons(self.fields.union(o.fields))
+
+    def geq(self, o: "AtomicType") -> bool:
+        match (self.atom, o.atom):
+            case (Top(), _) | (_, Bottom()):
+                return True
+            case (Bottom(), _) | (_, Top()):
+                return False
+            case (Atom(), Atom()):
+                raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class FuncCons(Constructor):
+    params: PSet[int]
+    rets: PSet[int]
+
+    def join(self, o: "FuncCons") -> "FuncCons":
+        # contra on params
+        return Func(self.params.union(o.params), self.rets.intersection(o.rets))
+
+    def meet(self, o: "FuncCons") -> "FuncCons":
+        return FVCons(self.params.intersection(o.params), self.rets.union(o.rets))
+
+    def geq(self, o: "FuncCons") -> bool:
+        self.params.issubset(o.params) and self.rets.issubset(o.rets)
+
+
+@dataclass(frozen=True)
+class TypeLattice:
+    map_domain: PMap[ConstructorID, Constructor]
+
+    # ub of type
+    def join(self, x: "TypeLattice"):
+        ks = set(x.map_domain.keys()).intersection(self.map_domain.keys())
+        return TypeLattice(pmap([(k, self.map_domain[k].join(x.map_domain[k])) for k in ks]))
+
+    def meet(self, x: "TypeLattice"):
+        ks = set(x.map_domain.keys()).union(self.map_domain.keys())
+
+        def maybe_meet(x: Optional[Constructor], y: Optional[Constructor]) -> Constructor:
+            if x and y:
+                return x.meet(y)
+            elif x:
+                return x
+            else:
+                return y
+
+        return TypeLattice(pmap([(k, maybe_meet(self.map_domain.get(k), x.map_domain.get(k))) for k in ks]))
+
+    def geq(self, o: "TypeLattice") -> bool:
+        return all([k in o.map_domain and self.map_domain[k].geq(o.map_domain[k]) for k in self.map_domain])
+
+# We need automata with a lot of extra bookkeeping so we just implement everything custom...
+
+
+# Edges
+
+
+class AlphabetSymbol(ABC):
+    pass
+
+
+@dataclass(frozen=True)
+class Epsilon(AlphabetSymbol):
+    pass
+
+
+@dataclass(frozen=True)
+class RecordLabel(AlphabetSymbol):
+    label: int
+
+
+@dataclass(frozen=True)
+class LoadLabel:
+    pass
+
+
+@dataclass(frozen=True)
+class StoreLabel:
+    pass
+
+
+@dataclass(frozen=True)
+class Parameter(AlphabetSymbol):
+    ind: int
+
+
+@dataclass(frozen=True)
+class Return(AlphabetSymbol):
+    ind: int
+
+
+@dataclass(frozen=True)
+class AutState:
+    polarity: bool
+    head_constructors: TypeLattice
+
+    def dfa_equiv(self, o: "AutState") -> bool:
+        return self.polarity == o.polarity and self.head_constructors.geq(o) and o.head_constructors.geq(self)
+
+
+T = TypeVar("T")
+
+
+class TypeAutomata:
+    # adjacency list
+    G: nx.DiGraph
+    epsilon_subgraph: nx.DiGraph
+    type_repr_nodes: dict[ReprTy, int]
+    rec_var_nodes: dict[FinalVar, int]
+    next_id: int
+    entry: Optional[int]
+    subnode_map: dict[int, PSet[int]]
+
+    def __init__(self) -> None:
+        self.next_id = 0
+        self.G = nx.DiGraph()
+        self.type_repr_nodes = dict()
+
+    def singleton(self, pol: bool, cons: Constructor) -> AutState:
+        return AutState(pol, TypeLattice(pmap([(cons.ident, cons)])))
+
+    def fresh_node_id(self) -> int:
+        res = self.next_id
+        self.next_id += 1
+        return res
+
+    def add_subnode(self, parents: PSet[int], st: AutState):
+        res_id = self.fresh_node_id()
+        self.G.add_node(res_id, state=st)
+        self.subnode_map[res_id] = parents
+        return res_id
+
+    def add_node(self, r: ReprTy, st: AutState) -> int:
+        res_id = self.fresh_node_id()
+        self.G.add_node(res_id, state=st)
+        self.type_repr_nodes[r] = res_id
+        return res_id
+
+    def add_singleton_node(self, r: ReprTy, pol: bool, cons: Constructor) -> int:
+        return self.add_node(r, self.singleton(pol, cons))
+
+    def add_edge(self, x: int, y: int, symb: AlphabetSymbol):
+        self.G.add_edge(x, y, symb=symb)
+
+    def build_ty_go(self, r: ReprTy, pol: bool) -> int:
+        self.entry = self.build(r, pol)
+        return self.entry
+
+    def build(self, r: ReprTy, polarity: bool) -> int:
+        def add_dict(d: PMap[T, ReprTy], new_pol: bool, ebuilder: Callable[[T], AlphabetSymbol], parent_node: int):
+            for (k, v) in d:
+                res_nd = self.build(v, new_pol)
+                lbl = ebuilder(k)
+                self.add_edge(parent_node, res_nd, lbl)
+
+        match r:
+            case Top() | Bottom() | Atom():
+                return self.add_singleton_node(r, polarity, AtomicType(r))
+            case RecType(bound=bnd, body=bdy):
+                bdy_node = self.build(bdy, polarity)
+                self.rec_var_nodes[bnd] = bdy_node
+            case Pointer(store_tv=stv, load_tv=ltv):
+                ptr_nd = self.add_singleton_node(r, polarity, PointerCons())
+                stv_nd = self.build(stv, not polarity)
+                ltv_nd = self.build(ltv, polarity)
+                self.add_edge(ptr_nd, stv_nd, StoreLabel())
+                self.add_edge(ptr_nd, ltv_nd, LoadLabel())
+            case Union(lhs=l, rhs=rh) | Intersection(lhs=l, rhs=rh):
+                lnd = self.build(l, polarity)
+                rnd = self.build(rh, polarity)
+                pnode = self.add_node(r, AutState(
+                    polarity, TypeLattice(pmap())))
+                self.add_edge(pnode, lnd, Epsilon())
+                self.add_edge(pnode, rnd, Epsilon())
+            case Func(params=prs, return_val=rets):
+                par = self.add_singleton_node(r, polarity, FuncCons(
+                    pset(prs.keys(), pset(rets.keys()))))
+                add_dict(prs, not polarity, Parameter, par)
+                add_dict(rets, polarity, Return, par)
+            case Record(fields=fs):
+                par = self.add_singleton_node(r, polarity, RecCons(
+                    pset(fs.keys())))
+                add_dict(fs, polarity, RecordLabel, par)
+            case FinalVar():
+                if r in self.rec_var_nodes:
+                    return self.rec_var_nodes[r]
+                else:
+                    return self.add_singleton_node(r, polarity, FVCons(pset([r])))
+            case _:
+                print(type(r))
+                assert False
+
+    def reachable_by_epsilon(self, x: int) -> PSet[int]:
+        if not self.epsilon_subgraph:
+            self.epsilon_subgraph = self.G.edge_subgraph(
+                [(src, dst) for (src, dst, symb) in self.G.edges.data("symb") if symb == Epsilon()])
+        return pset(nx.dfs_preorder_nodes(self.epsilon_subgraph, source=x)).add(x)
+
+    # collect transitions, closed under epsilon
+    def collect_transition_table(self, x: PSet[int]) -> dict[AlphabetSymbol, PSet[int]]:
+        ttable = dict()
+
+        for (_, dst, symb) in self.G.out_edges(nbunch=x).data("symb"):
+            curr_set = ttable.get(symb, pset())
+            ttable[symb] = curr_set.union(self.reachable_by_epsilon(dst))
+
+        return ttable
+
+    def merge_nodes(self, nds: PSet[int]) -> AutState:
+        pol = None
+        curr_state = None
+        for nd in nds:
+            st: AutState = self.G.nodes[nd]["state"]
+            if not pol:
+                pol = st.polarity
+                curr_state = st
+            else:
+                assert pol == st.polarity
+                ncons = curr_state.head_constructors.join(
+                    st.head_constructors) if pol else curr_state.head_constructors.meet(st.head_constructors)
+                curr_state = AutState(pol, ncons)
+
+        return curr_state
+
+    def detereminise(self):
+        handled_nds: dict[PSet[int], int] = dict()
+        new_aut = TypeAutomata()
+        # closed_list: set[PSet[int]] = set()
+        q = deque[PSet[int]] = deque()
+
+        ent_nodes = self.reachable_by_epsilon(self.entry)
+        q.append(ent_nodes)
+        new_aut.add_subnode(ent_nodes, self.merge_nodes(ent_nodes))
+
+        # algo: initialize a queue to the entry nodes (all nodes reachable from entry by epsilon).
+        # at each step take off a node, and follow that node through epsilon edges determining a new transition table for each alphabet symbol
+        # for each alphabet symbol S collect all reachable nodes E and add a node {E}. Add an edge from curr node to {E} with weight S. Add {E} to the queue provided we have not visited {E}.
+        while len(q) > 0:
+            curr = q.popleft()
+
+            target_node = handled_nds[curr]
+
+            for (symb, tset) in self.collect_transition_table(curr).items():
+                dst_node = None
+                if tset not in handled_nds:
+                    dst_node = new_aut.add_subnode(
+                        tset, self.merge_nodes(tset))
+                    handled_nds[tset] = dst_node
+                    q.append(tset)
+                else:
+                    dst_node = handled_nds[tset]
+
+                new_aut.add_edge(target_node, dst_node, symb)
+
+        return new_aut
+
+    def minimise(self):
+        # so ok the idea here is we have two types of states:
+        # those that have constructors and those that dont.
+        # those that have constructors are essentially accepting states (they form a type).
+        # So ok when are two automata states "indistinguishable"... when forall words of capabilities they lead to the same polar constructor
+        # So in theory our first paritions are [unlabeled states of polarity x, unlabeled states of polarity y, labeled with each cons polarity x, labeled with each cons polarity y]
+        # so we need the following predicate: AutStatex == AutStatey iff consx == consy && polx == poly
+
+        raise NotImplementedError
+
+    def decompile(self):
+        pass
 
 
 class Optimizer:
