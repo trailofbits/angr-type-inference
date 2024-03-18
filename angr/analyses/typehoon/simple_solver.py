@@ -377,9 +377,16 @@ class ConstraintGraphNode:
 
 
 class BaseSolver(ABC):
-    def __init__(self, constraints) -> None:
+    def __init__(self, constraints, bits: int) -> None:
+        if bits not in (32, 64):
+            raise ValueError(
+                "Pointer size %d is not supported. Expect 32 or 64." % bits)
         self._equivalence = defaultdict(dict)
         self._constraints = constraints
+        self._base_lattice = BASE_LATTICES[bits]
+        self._base_lattice_inverted = networkx.DiGraph()
+        for src, dst in self._base_lattice.edges:
+            self._base_lattice_inverted.add_edge(dst, src)
 
         for typevar in list(self._constraints):
             if self._constraints[typevar]:
@@ -480,18 +487,9 @@ class SimpleSolver(BaseSolver):
     """
 
     def __init__(self, bits: int, constraints, typevars):
-        super().__init__(constraints)
-        if bits not in (32, 64):
-            raise ValueError(
-                "Pointer size %d is not supported. Expect 32 or 64." % bits)
-
-        super().__init__(constraints)
+        super().__init__(constraints, bits)
         self.bits = bits
         self._typevars: Set[TypeVariable] = typevars
-        self._base_lattice = BASE_LATTICES[bits]
-        self._base_lattice_inverted = networkx.DiGraph()
-        for src, dst in self._base_lattice.edges:
-            self._base_lattice_inverted.add_edge(dst, src)
 
         #
         # Solving state

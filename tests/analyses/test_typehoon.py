@@ -69,7 +69,7 @@ class TestTypehoon(unittest.TestCase):
 
         print(vr.var_to_typevars)
 
-        solved = ConstraintGenerator(vr.type_constraints)
+        solved = ConstraintGenerator(vr.type_constraints, 64)
         print(solved.solved_types)
         for s in [v for (k, v) in vr.var_to_typevars.items() if k.name == "s_10"]:
             for tv in s:

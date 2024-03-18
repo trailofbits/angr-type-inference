@@ -6,6 +6,7 @@ from abc import ABC
 from dataclasses import dataclass
 from typing import Set, Iterator, Optional, Any
 from .typevars import Existence, Subtype, TypeVariable, DerivedTypeVariable, TypeConstraint
+from .typeconsts import TypeConstant
 from .simple_solver import BaseSolver
 from enum import Enum
 from functools import partial, reduce
@@ -13,7 +14,7 @@ import copy
 import itertools
 from pyrsistent import m, pmap, PMap, pset, PSet
 from collections import defaultdict
-from .typeconsts import TopType as TypehoonTop, BottomType as TypehoonBot, Int as TypehoonInt, FloatBase as TypehoonFloat
+from .typeconsts import TopType as TypehoonTop, BottomType as TypehoonBot, Int as TypehoonInt, FloatBase as TypehoonFloat, Pointer as TypehoonPointer
 import networkx as nx
 # Import labels
 from .typevars import FuncIn, FuncOut, Load, Store, ConvertTo, HasField, BaseLabel
@@ -152,10 +153,41 @@ class VariableStorage:
     def __deepcopy__(self, memo):
         return self
 
+# an atom wraps a base type from angr and provides lattice operations
 
-@dataclass(frozen=True)
+
 class Atom:
-    name: str
+    name: TypeConstant
+    lat_fwd: nx.DiGraph
+    lat_bkwd: nx.DiGraph
+
+    def __init__(self, name: TypeConstant, lat_fwd: nx.DiGraph, lat_bkwd: nx.DiGraph) -> None:
+        self.name = name
+        self.lat_fwd = lat_fwd
+        self.lat_bkwd = lat_bkwd
+
+    def __eq__(self, __value: object) -> bool:
+        return isinstance(__value, Atom) and self.name == __value.name
+
+    def __hash__(self) -> int:
+        return hash(self.name)
+
+    def translate(self, o: TypeConstant):
+        match o:
+            case TypehoonTop():
+                return Top()
+            case TypehoonBot():
+                return Bottom()
+            case _:
+                return o
+
+    def join(self, o: "Atom") -> "Atom":
+        res = nx.lowest_common_ancestor(self.lat_bkwd, self.name, o.name)
+        return self.translate(res)
+
+    def meet(self, o: "Atom") -> "Atom":
+        res = nx.lowest_common_ancestor(self.lat_fwd, self.name, o.name)
+        return self.translate(res)
 
 
 """
@@ -334,11 +366,13 @@ class UnificationPass:
     that represent the subtyping relation
     """
 
-    def __init__(self) -> None:
+    def __init__(self, lat, lat_inverted) -> None:
         super().__init__()
         self.constraints: list[tuple[ReprTy, ReprTy]] = []
         self.base_var_map: dict[TypeVariable, ConsTy] = {}
         self.type_classes = DisjointSet()
+        self._lat = lat
+        self._lat_inverted = lat_inverted
 
     def constrain(self, x, y):
         self.constraints.append((x, y))
@@ -494,18 +528,20 @@ class UnificationPass:
                 return Bottom()
             case TypehoonTop():
                 return Top()
+            case TypehoonPointer():
+                return Atom(ty, self._lat, self._lat_inverted)
             case TypehoonFloat():
-                return Atom(str(ty))
+                return Atom(ty, self._lat, self._lat_inverted)
             case TypehoonInt():
-                return Atom(str(ty))
+                return Atom(ty, self._lat, self._lat_inverted)
             case _:
                 print(ty)
                 assert False
 
 
 class ConstraintGenerator(BaseSolver, VariableHandler):
-    def __init__(self, ty_cons: Set["TypeConstraint"]) -> None:
-        super().__init__(ty_cons)
+    def __init__(self, ty_cons: Set["TypeConstraint"], bit_size: int) -> None:
+        super().__init__(ty_cons, bit_size)
         self.base_var_map: dict[TypeVariable, ConsTy] = {}
         self.ordered_vars: list[ConsTy] = []
         self.orig_cons = {}
@@ -535,7 +571,7 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
         self.solved_types = self.coalesce_types()
 
     def infer_types(self):
-        uf = UnificationPass()
+        uf = UnificationPass(self._base_lattice, self._base_lattice_inverted)
         for (f, cons_set) in self.orig_cons.items():
             for cons in cons_set:
                 match cons:
@@ -651,8 +687,8 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
                     return ty
                 case Bottom():
                     return ty
-                case Atom(name=aty):
-                    return Atom(aty)
+                case Atom():
+                    return ty
                 case Func(params=prs, return_val=rets):
                     return Func(ConstraintGenerator.map_value(rec_neg, prs), ConstraintGenerator.map_value(rec_pos, rets))
                 case Record(fields=fs):
@@ -683,11 +719,6 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
                 if k in self.base_var_map:
                     tot[k] = self.coalesce(self.base_var_map[k])
         return tot
-
-
-class TypePrinter:
-    def __init__(self) -> None:
-        pass
 
 
 def merge_dicts(f: Callable, xit: HashDict, yit: HashDict) -> HashDict:
@@ -740,11 +771,6 @@ def join_dict_list(xs, ys, rec):
         x, y, rec) if (x is not None) and (y is not None) else None))(xs, ys)
 
 # TODO: these are ineffecient maybe just do a DFA union/intersection
-
-
-@dataclass
-class VariableBoundedType:
-    ub: set[FinalVar]
 
 
 def is_constructor_type(r1: ReprTy) -> bool:
@@ -961,7 +987,7 @@ class AtomicType(Constructor):
             case (Bottom(), x):
                 return Atom(x)
             case (Atom(), Atom()):
-                raise NotImplementedError
+                return self.atom.join(o.atom)
 
     def meet(self, o: "AtomicType") -> "AtomicType":
         return RecCons(self.fields.union(o.fields))
@@ -973,7 +999,7 @@ class AtomicType(Constructor):
             case (Bottom(), _) | (_, Top()):
                 return False
             case (Atom(), Atom()):
-                raise NotImplementedError
+                return self.atom.meet(o.atom)
 
 
 @dataclass(frozen=True)
