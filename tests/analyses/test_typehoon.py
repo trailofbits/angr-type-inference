@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # pylint:disable=missing-class-docstring,no-self-use
+import networkx as nx
 from angr.angrdb import AngrDB
-from angr.analyses.typehoon.algebraic_solver import ConstraintGenerator, Atom, Optimizer
+from angr.analyses.typehoon.algebraic_solver import ConstraintGenerator, Atom, TypeAutomata
 from angr.analyses.typehoon import algebraic_solver
 from angr.analyses.typehoon.typevars import TypeConstraint, Subtype, Load, HasField, TypeVariable, DerivedTypeVariable, FuncIn
 __package__ = __package__ or "tests.analyses"  # pylint:disable=redefined-builtin
@@ -79,12 +80,20 @@ class TestTypehoon(unittest.TestCase):
                     ty = solved.coalesce_acc(
                         solved.base_var_map[tv], pmap(), False)
                     print("Coalesced:", ty)
-                    opt = Optimizer()
+                    # opt = Optimizer()
                     # print(solved.solved_types[tv])
-                    optimized = opt.optimize_ty(ty, False)
-                    print("Optimized: ", optimized)
-                    print("Evaled: ", algebraic_solver.evaluate_type(
-                        optimized))
+                    # optimized = opt.optimize_ty(ty, False)
+                    # print("Optimized: ", optimized)
+                    # print("Evaled: ", algebraic_solver.evaluate_type(
+                    #    optimized))
+
+                    ty_aut = TypeAutomata()
+                    ty_aut.build_ty_go(ty, False)
+                    ty_aut.write("/tmp/built")
+
+                    det_aut = ty_aut.detereminise()
+                    min_aut = det_aut.minimise()
+                    nx.drawing.nx_pydot.write_dot(min_aut.G, "/tmp/dot")
         assert False
 
     def test_smoketest(self):

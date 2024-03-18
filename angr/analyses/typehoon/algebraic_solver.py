@@ -875,7 +875,7 @@ class ConstructorID:
 class Constructor(ABC):
     @property
     @abstractmethod
-    def ident() -> ConstructorID:
+    def ident(self) -> ConstructorID:
         pass
 
     @abstractmethod
@@ -895,19 +895,27 @@ class Constructor(ABC):
 class FVCons(Constructor):
     representing: PSet[FinalVar]
 
+    @property
+    def ident(self) -> ConstructorID:
+        return 1
+
     def join(self, o: "FVCons") -> "FVCons":
-        return FVCons(self.representing.intersection(o))
+        return FVCons(self.representing.intersection(o.representing))
 
     def meet(self, o: "FVCons") -> "FVCons":
-        return FVCons(self.representing.union(o))
+        return FVCons(self.representing.union(o.representing))
 
     def geq(self, o: "FVCons") -> bool:
-        return self.representing.issubset(o)
+        return self.representing.issubset(o.representing)
 
 
 @dataclass(frozen=True)
 class RecCons(Constructor):
     fields: PSet[int]
+
+    @property
+    def ident(self) -> ConstructorID:
+        return 2
 
     def join(self, o: "RecCons") -> "RecCons":
         # contra on params
@@ -920,8 +928,12 @@ class RecCons(Constructor):
         return self.fields.issubset(o)
 
 
-@dataclass
+@dataclass(frozen=True)
 class PointerCons(Constructor):
+    @property
+    def ident(self) -> ConstructorID:
+        return 3
+
     def join(self, o: "PointerCons") -> "PointerCons":
         return self
 
@@ -932,9 +944,13 @@ class PointerCons(Constructor):
         return True
 
 
-@dataclass
+@dataclass(frozen=True)
 class AtomicType(Constructor):
     atom: Atom | Top | Bottom
+
+    @property
+    def ident(self) -> ConstructorID:
+        return 4
 
     def join(self, o: "AtomicType") -> "AtomicType":
         match (self.atom, o.atom):
@@ -964,6 +980,10 @@ class AtomicType(Constructor):
 class FuncCons(Constructor):
     params: PSet[int]
     rets: PSet[int]
+
+    @property
+    def ident(self) -> ConstructorID:
+        return 5
 
     def join(self, o: "FuncCons") -> "FuncCons":
         # contra on params
@@ -1054,6 +1074,9 @@ T = TypeVar("T")
 
 
 class TypeAutomata:
+    SYMB_NAME = "label"
+    STATE_NAME = "state"
+
     # adjacency list
     G: nx.DiGraph
     epsilon_subgraph: nx.DiGraph
@@ -1067,6 +1090,10 @@ class TypeAutomata:
         self.next_id = 0
         self.G = nx.DiGraph()
         self.type_repr_nodes = dict()
+        self.rec_var_nodes = dict()
+        self.entry = None
+        self.subnode_map = dict()
+        self.epsilon_subgraph = None
 
     def singleton(self, pol: bool, cons: Constructor) -> AutState:
         return AutState(pol, TypeLattice(pmap([(cons.ident, cons)])))
@@ -1078,13 +1105,13 @@ class TypeAutomata:
 
     def add_subnode(self, parents: PSet[int], st: AutState):
         res_id = self.fresh_node_id()
-        self.G.add_node(res_id, state=st)
+        self.G.add_node(res_id, **{TypeAutomata.STATE_NAME: st})
         self.subnode_map[res_id] = parents
         return res_id
 
     def add_node(self, r: ReprTy, st: AutState) -> int:
         res_id = self.fresh_node_id()
-        self.G.add_node(res_id, state=st)
+        self.G.add_node(res_id,  **{TypeAutomata.STATE_NAME: st})
         self.type_repr_nodes[r] = res_id
         return res_id
 
@@ -1092,7 +1119,7 @@ class TypeAutomata:
         return self.add_node(r, self.singleton(pol, cons))
 
     def add_edge(self, x: int, y: int, symb: AlphabetSymbol):
-        self.G.add_edge(x, y, symb=symb)
+        self.G.add_edge(x, y, **{TypeAutomata.SYMB_NAME: symb})
 
     def build_ty_go(self, r: ReprTy, pol: bool) -> int:
         self.entry = self.build(r, pol)
@@ -1100,7 +1127,7 @@ class TypeAutomata:
 
     def build(self, r: ReprTy, polarity: bool) -> int:
         def add_dict(d: PMap[T, ReprTy], new_pol: bool, ebuilder: Callable[[T], AlphabetSymbol], parent_node: int):
-            for (k, v) in d:
+            for (k, v) in d.items():
                 res_nd = self.build(v, new_pol)
                 lbl = ebuilder(k)
                 self.add_edge(parent_node, res_nd, lbl)
@@ -1111,12 +1138,14 @@ class TypeAutomata:
             case RecType(bound=bnd, body=bdy):
                 bdy_node = self.build(bdy, polarity)
                 self.rec_var_nodes[bnd] = bdy_node
+                return bdy_node
             case Pointer(store_tv=stv, load_tv=ltv):
                 ptr_nd = self.add_singleton_node(r, polarity, PointerCons())
                 stv_nd = self.build(stv, not polarity)
                 ltv_nd = self.build(ltv, polarity)
                 self.add_edge(ptr_nd, stv_nd, StoreLabel())
                 self.add_edge(ptr_nd, ltv_nd, LoadLabel())
+                return ptr_nd
             case Union(lhs=l, rhs=rh) | Intersection(lhs=l, rhs=rh):
                 lnd = self.build(l, polarity)
                 rnd = self.build(rh, polarity)
@@ -1124,15 +1153,19 @@ class TypeAutomata:
                     polarity, TypeLattice(pmap())))
                 self.add_edge(pnode, lnd, Epsilon())
                 self.add_edge(pnode, rnd, Epsilon())
+                return pnode
             case Func(params=prs, return_val=rets):
                 par = self.add_singleton_node(r, polarity, FuncCons(
                     pset(prs.keys(), pset(rets.keys()))))
                 add_dict(prs, not polarity, Parameter, par)
                 add_dict(rets, polarity, Return, par)
+                return par
             case Record(fields=fs):
                 par = self.add_singleton_node(r, polarity, RecCons(
                     pset(fs.keys())))
+                print(fs)
                 add_dict(fs, polarity, RecordLabel, par)
+                return par
             case FinalVar():
                 if r in self.rec_var_nodes:
                     return self.rec_var_nodes[r]
@@ -1142,19 +1175,26 @@ class TypeAutomata:
                 print(type(r))
                 assert False
 
+        assert False
+
     def reachable_by_epsilon(self, x: int) -> PSet[int]:
         if not self.epsilon_subgraph:
             self.epsilon_subgraph = self.G.edge_subgraph(
-                [(src, dst) for (src, dst, symb) in self.G.edges.data("symb") if symb == Epsilon()])
+                [(src, dst) for (src, dst, symb) in self.G.edges.data(TypeAutomata.SYMB_NAME) if symb == Epsilon()])
+            assert Epsilon() == Epsilon()
+            print("Epsilon edges", self.epsilon_subgraph.edges())
+        if not (x in self.epsilon_subgraph.nodes):
+            return pset([x])
         return pset(nx.dfs_preorder_nodes(self.epsilon_subgraph, source=x)).add(x)
 
     # collect transitions, closed under epsilon
     def collect_transition_table(self, x: PSet[int]) -> dict[AlphabetSymbol, PSet[int]]:
         ttable = dict()
 
-        for (_, dst, symb) in self.G.out_edges(nbunch=x).data("symb"):
-            curr_set = ttable.get(symb, pset())
-            ttable[symb] = curr_set.union(self.reachable_by_epsilon(dst))
+        for (_, dst, symb) in self.G.out_edges(nbunch=x, data=TypeAutomata.SYMB_NAME):
+            if symb != Epsilon():
+                curr_set = ttable.get(symb, pset())
+                ttable[symb] = curr_set.union(self.reachable_by_epsilon(dst))
 
         return ttable
 
@@ -1162,7 +1202,7 @@ class TypeAutomata:
         pol = None
         curr_state = None
         for nd in nds:
-            st: AutState = self.G.nodes[nd]["state"]
+            st: AutState = self.G.nodes[nd][TypeAutomata.STATE_NAME]
             if not pol:
                 pol = st.polarity
                 curr_state = st
@@ -1178,11 +1218,14 @@ class TypeAutomata:
         handled_nds: dict[PSet[int], int] = dict()
         new_aut = TypeAutomata()
         # closed_list: set[PSet[int]] = set()
-        q = deque[PSet[int]] = deque()
+        q: deque[PSet[int]] = deque()
 
         ent_nodes = self.reachable_by_epsilon(self.entry)
         q.append(ent_nodes)
-        new_aut.add_subnode(ent_nodes, self.merge_nodes(ent_nodes))
+        print("Ent nodes: ", ent_nodes)
+        new_aut.entry = new_aut.add_subnode(
+            ent_nodes, self.merge_nodes(ent_nodes))
+        handled_nds[ent_nodes] = new_aut.entry
 
         # algo: initialize a queue to the entry nodes (all nodes reachable from entry by epsilon).
         # at each step take off a node, and follow that node through epsilon edges determining a new transition table for each alphabet symbol
@@ -1206,6 +1249,47 @@ class TypeAutomata:
 
         return new_aut
 
+    def initial_partitions(self) -> list[set[int]]:
+        # TODO(Ian): double check that default eq/hash works
+        tot: dict[AutState, set[int]] = dict()
+        for (lbl, st) in self.G.nodes.data(TypeAutomata.STATE_NAME):
+            tot.setdefault(st, set()).add(lbl)
+
+        return list(map(lambda x: x[1], tot.items()))
+
+    def repartition(self, parts: list[set[int]]) -> list[set[int]]:
+        # 1. collect node -> orig_index map
+        # 2. for each partition collect a map nd -> (A, index) and add to partitions
+        # 3. push partitions to list
+
+        orig_part: dict[int, int] = dict()
+        for (idx, part) in enumerate(parts):
+            for nod in part:
+                orig_part[nod] = idx
+
+        tot = list()
+        for part in parts:
+            part_trans_to_nodes: dict[frozenset[tuple[AlphabetSymbol, int]], set[int]] = dict(
+            )
+            for nd in part:
+                part_trans_to_nodes.setdefault(frozenset([(A, orig_part[dst])
+                                                          for (_, dst, A) in self.G.edges(nd, data=TypeAutomata.SYMB_NAME)]), set()).add(nd)
+
+            for _, np in part_trans_to_nodes.items():
+                tot.append(np)
+
+        return tot
+
+    def write(self, pth):
+        writeable_G = nx.DiGraph()
+        for nd in self.G.nodes:
+            writeable_G.add_node(nd)
+
+        for (src, dst, symb) in self.G.edges(data=TypeAutomata.SYMB_NAME):
+            writeable_G.add_edge(src, dst, label=str(symb))
+
+        nx.drawing.nx_pydot.write_dot(writeable_G, pth)
+
     def minimise(self):
         # so ok the idea here is we have two types of states:
         # those that have constructors and those that dont.
@@ -1214,7 +1298,31 @@ class TypeAutomata:
         # So in theory our first paritions are [unlabeled states of polarity x, unlabeled states of polarity y, labeled with each cons polarity x, labeled with each cons polarity y]
         # so we need the following predicate: AutStatex == AutStatey iff consx == consy && polx == poly
 
-        raise NotImplementedError
+        parts = self.initial_partitions()
+        while True:
+            np = self.repartition(parts)
+            if len(np) == len(parts):
+                break
+            parts = np
+        new_aut = TypeAutomata()
+
+        new_nd_lookup: dict[int, int] = dict()
+        for pt in parts:
+            nd_pars = pset(pt)
+            part_node = self.add_subnode(nd_pars, self.merge_nodes(nd_pars))
+            for nd in pt:
+                new_nd_lookup[nd] = part_node
+
+        new_aut.entry = new_nd_lookup[self.entry]
+
+        edge_set: set[tuple[int, int, AlphabetSymbol]] = set()
+        for (src, dst, symb) in self.G.edges.data(TypeAutomata.SYMB_NAME):
+            edge_set.add((new_nd_lookup[src], new_nd_lookup[dst], symb))
+
+        for (src, dst, symb) in edge_set:
+            new_aut.add_edge(src, dst, symb)
+
+        return new_aut
 
     def decompile(self):
         pass
