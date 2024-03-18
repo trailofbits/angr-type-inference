@@ -1136,8 +1136,16 @@ class TypeAutomata:
             case Top() | Bottom() | Atom():
                 return self.add_singleton_node(r, polarity, AtomicType(r))
             case RecType(bound=bnd, body=bdy):
+                # hacky way to setup a rec node, add an empty node to capture recursive edges
+                self.G.add_node(self.next_id)
+                fake_node = self.next_id
+                self.next_id += 1
+                self.rec_var_nodes[bnd] = fake_node
                 bdy_node = self.build(bdy, polarity)
-                self.rec_var_nodes[bnd] = bdy_node
+
+                for (src, _, lbl) in self.G.in_edges(fake_node, data=TypeAutomata.SYMB_NAME):
+                    self.add_edge(src, bdy_node, lbl)
+                self.G.remove_node(fake_node)
                 return bdy_node
             case Pointer(store_tv=stv, load_tv=ltv):
                 ptr_nd = self.add_singleton_node(r, polarity, PointerCons())
