@@ -14,11 +14,11 @@ import copy
 import itertools
 from pyrsistent import m, pmap, PMap, pset, PSet
 from collections import defaultdict
-from .typeconsts import TopType as TypehoonTop, BottomType as TypehoonBot, Int as TypehoonInt, FloatBase as TypehoonFloat, Pointer as TypehoonPointer
+from .typeconsts import TopType as TypehoonTop, BottomType as TypehoonBot, Int as TypehoonInt, FloatBase as TypehoonFloat, Pointer as TypehoonPointer, Struct as TypehoonStruct, Function as TypehoonFunc, Pointer32 as TypehoonPointer32, Pointer64 as TypehoonPointer64
 import networkx as nx
 # Import labels
 from .typevars import FuncIn, FuncOut, Load, Store, ConvertTo, HasField, BaseLabel
-from typing import TypeVar, Callable, Optional
+from typing import TypeVar, Callable, Optional, Generator
 from collections import deque
 # A type variable is a unique holder of constraints
 
@@ -542,6 +542,8 @@ class UnificationPass:
 class ConstraintGenerator(BaseSolver, VariableHandler):
     def __init__(self, ty_cons: Set["TypeConstraint"], bit_size: int) -> None:
         super().__init__(ty_cons, bit_size)
+        self.pointer_builder = TypehoonPointer64 if bit_size == 64 else TypehoonPointer32
+        self.bit_size = bit_size
         self.base_var_map: dict[TypeVariable, ConsTy] = {}
         self.ordered_vars: list[ConsTy] = []
         self.orig_cons = {}
@@ -552,6 +554,8 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
         self.recursive_polar_types: dict[PolarVariable, FinalVar] = dict()
         self.vstor_to_final_var: dict[VariableStorage, FinalVar] = dict()
         self.solved_types = {}
+        self.solution = {}
+        self.saved_structs: dict[int, TypehoonStruct] = {}
         self.solve_subtyping_constraints(self._constraints)
 
     def dump_state(self) -> str:
@@ -564,11 +568,144 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
                 base += f"{{lbs : {v.lower_bounds}, ubs: {v.upper_bounds}}}\n"
         return base
 
+    def clinic_solve(self, constraints: Set["TypeConstraint"]):
+        self.orig_cons = constraints
+        self.infer_types()
+
+    def find_internal_edges(self, G: nx.MultiDiGraph, scc: set[int]) -> Generator[tuple[int, int, "AlphabetSymbol"], None, None]:
+        print(scc)
+        for nd in scc:
+            for (src, dst, symb) in G.out_edges(nd, data=TypeAutomata.SYMB_NAME):
+                if dst in scc:
+                    yield (src, dst, symb)
+
+    def select_named_struct_edge(self, G: nx.MultiDiGraph, scc: set[int]) -> Optional[tuple[int, int, "AlphabetSymbol"]]:
+        for (src, dst, symb) in self.find_internal_edges(G, scc):
+            st: AutState = G.nodes[dst][TypeAutomata.STATE_NAME]
+            if RecCons(pset()).ident in st.head_constructors.map_domain and symb == PointerCons():
+                return (src, dst, symb)
+        return None
+
+    def collect_edges_of(self, nd: int,  G: nx.MultiDiGraph, look_for: "AlphabetSymbol", dict_nodes: dict[int, int], pol: bool) -> Optional[TypeConstant]:
+        # TODO(Ian): join and meet
+        return next(map(lambda d: self.build_angr_type_for_node(d, G, dict_nodes), [dst for (_, dst, symb) in G.out_edges(nd, data=TypeAutomata.SYMB_NAME) if symb == look_for]), None)
+
+    def build_edges(self, nd: int,  G: nx.MultiDiGraph, look_for: list[tuple["AlphabetSymbol", bool]], dict_nodes: dict[int, int]) -> list[TypeConstant]:
+        tot = []
+        for (x, pol) in [(self.collect_edges_of(nd, G, sym, dict_nodes, pol), pol)
+                         for (sym, pol) in look_for]:
+            if x:
+                tot.append(x)
+            else:
+                tot.append(TypehoonTop() if pol else TypehoonBot())
+        return tot
+
+    def build_record(self, nd: int,  G: nx.MultiDiGraph, cons: "RecCons", dict_nodes, pol: bool) -> TypehoonStruct:
+        s = self.get_or_replace_struct(nd)
+        es = dict(zip(cons.fields, self.build_edges(nd, G, [(RecordLabel(v), pol)
+                                                            for v in cons.fields], dict_nodes)))
+
+        s.fields = es
+        return s
+
+    def build_pointer(self, nd: int,  G: nx.MultiDiGraph, dict_nodes, pol: bool) -> TypehoonPointer:
+        es = self.build_edges(nd, G, [(LoadLabel(), pol),
+                                      (StoreLabel(), not pol)], dict_nodes)
+        return self.pointer_builder(es[0])
+
+    def build_function(self, nd: int,  G: nx.MultiDiGraph, func: "FuncCons", dict_nodes, pol: bool) -> TypehoonFunc:
+        params = [(Parameter(x), not pol) for x in range(0, max(func.params))]
+        rets = [(Return(x), pol) for x in range(0, max(func.rets))]
+        ps = self.build_edges(nd, G, params, dict_nodes)
+        rs = self.build_edges(nd, G, rets, dict_nodes)
+
+        return TypehoonFunc(ps, rs)
+
+    def get_or_replace_struct(self, nd: int):
+        return self.saved_structs.setdefault(nd, TypehoonStruct({}))
+
+    def build_angr_type_for_node(self, nd: int,  G: nx.MultiDiGraph, dict_nodes: dict[int, int]) -> TypeConstant:
+        st: AutState = G.nodes[nd][TypeAutomata.STATE_NAME]
+        if nd in dict_nodes:
+            return self.get_or_replace_struct(nd)
+
+        if RecCons(pset()).ident in st.head_constructors.map_domain:
+            return self.build_record(nd, G, st.head_constructors.map_domain[RecCons(pset()).ident], dict_nodes, st.polarity)
+
+        if PointerCons().ident in st.head_constructors.map_domain:
+            return self.build_pointer(nd, G, dict_nodes, st.polarity)
+
+        if FuncCons(dict(), dict()).ident in st.head_constructors.map_domain:
+            return self.build_function(nd, G, st.head_constructors.map_domain[FuncCons(dict(), dict()).ident], dict_nodes, st.polarity)
+
+        if AtomicType(Top()).ident in st.head_constructors.map_domain:
+            at = st.head_constructors.map_domain[AtomicType(Top()).ident]
+            match at:
+                case Atom(name=nm):
+                    return nm
+                case Top():
+                    return TypehoonTop()
+                case Bottom():
+                    return TypehoonBot()
+
+        return TypehoonTop() if st.polarity else TypehoonBot()
+
+    def to_angr_type(self, ty: "TypeAutomata") -> TypeConstant:
+        # first we break loops
+        # iirc doing this optimally is np-hard
+        # so for now something sensible... select
+        assert ty.entry in ty.G.nodes
+        while True:
+            comps = list(nx.strongly_connected_components(ty.G))
+            cycles = False
+            for scc in comps:
+                if len(scc) > 1:
+                    cycles = True
+                    maybe_struct_edge = self.select_named_struct_edge(
+                        ty.G, scc)
+                    maybe_ptr_edge = next(filter(
+                        lambda x: x[2] == PointerCons(), self.find_internal_edges(ty.G, scc)), None)
+                    backup_edge = maybe_ptr_edge if maybe_ptr_edge else next(
+                        self.find_internal_edges(ty.G, scc))
+                    if maybe_struct_edge:
+                        ty.G.remove_edge(
+                            maybe_struct_edge[0], maybe_struct_edge[1])
+                        rec = ty.add_named_struct_node(maybe_struct_edge[1])
+                        ty.add_edge(maybe_struct_edge[0], rec, PointerCons())
+                    else:
+                        ty.G.remove_edge(backup_edge[0], backup_edge[1])
+                        dst = ty.add_singleton_node(
+                            Bottom(), False, AtomicType(Bottom()))
+                        ty.add_edge(backup_edge[0], dst, backup_edge[2])
+            if not cycles:
+                break
+
+        return self.build_angr_type_for_node(ty.entry, ty.G, ty.named_struct_nodes)
+
+    def determine_type(self, r: ReprTy):
+        aut = TypeAutomata()
+        aut.build_ty_go(r, False)
+        assert aut.entry in aut.G.nodes
+        det_aut = aut.detereminise()
+        assert det_aut.entry in det_aut.G.nodes
+        min_aut = det_aut.minimise()
+        assert min_aut.entry in min_aut.G.nodes
+        return self.to_angr_type(min_aut)
+
+    def build_solution(self):
+        tot = dict()
+        for k in self.base_var_map:
+            ctype = self.coalesce_acc(
+                self.base_var_map[k], pmap(), False)
+            tot[k] = self.determine_type(ctype)
+        return tot
+
     def solve_subtyping_constraints(self, constraints: Set["TypeConstraint"]):
         self.orig_cons = constraints
         self.infer_types()
-        print(self.dump_state())
-        self.solved_types = self.coalesce_types()
+        # print(self.dump_state())
+        # self.solved_types = self.coalesce_types()
+        self.solution = self.build_solution()
 
     def infer_types(self):
         uf = UnificationPass(self._base_lattice, self._base_lattice_inverted)
@@ -932,25 +1069,33 @@ class TypeAutomata:
     STATE_NAME = "state"
 
     # adjacency list
-    G: nx.DiGraph
-    epsilon_subgraph: nx.DiGraph
+    G: nx.MultiDiGraph
+    epsilon_subgraph: nx.MultiDiGraph
     type_repr_nodes: dict[ReprTy, int]
     rec_var_nodes: dict[FinalVar, int]
     next_id: int
     entry: Optional[int]
     subnode_map: dict[int, PSet[int]]
+    named_struct_nodes: dict[int, int]
 
     def __init__(self) -> None:
         self.next_id = 0
-        self.G = nx.DiGraph()
+        self.G = nx.MultiDiGraph()
         self.type_repr_nodes = dict()
         self.rec_var_nodes = dict()
         self.entry = None
         self.subnode_map = dict()
         self.epsilon_subgraph = None
+        self.named_struct_nodes = {}
 
     def singleton(self, pol: bool, cons: Constructor) -> AutState:
         return AutState(pol, TypeLattice(pmap([(cons.ident, cons)])))
+
+    def add_named_struct_node(self, target: int) -> int:
+        ndid = self.fresh_node_id()
+        self.named_struct_nodes[ndid] = target
+        self.G.add_node(ndid)
+        return ndid
 
     def fresh_node_id(self) -> int:
         res = self.next_id
@@ -1042,7 +1187,7 @@ class TypeAutomata:
     def reachable_by_epsilon(self, x: int) -> PSet[int]:
         if not self.epsilon_subgraph:
             self.epsilon_subgraph = self.G.edge_subgraph(
-                [(src, dst) for (src, dst, symb) in self.G.edges.data(TypeAutomata.SYMB_NAME) if symb == Epsilon()])
+                [e for e in self.G.edges if self.G.edges[e][TypeAutomata.SYMB_NAME] == Epsilon()])
             assert Epsilon() == Epsilon()
             print("Epsilon edges", self.epsilon_subgraph.edges())
         if not (x in self.epsilon_subgraph.nodes):
@@ -1143,7 +1288,7 @@ class TypeAutomata:
         return tot
 
     def write(self, pth):
-        writeable_G = nx.DiGraph()
+        writeable_G = nx.MultiDiGraph()
         for nd in self.G.nodes:
             writeable_G.add_node(nd)
 
@@ -1171,7 +1316,7 @@ class TypeAutomata:
         new_nd_lookup: dict[int, int] = dict()
         for pt in parts:
             nd_pars = pset(pt)
-            part_node = self.add_subnode(nd_pars, self.merge_nodes(nd_pars))
+            part_node = new_aut.add_subnode(nd_pars, self.merge_nodes(nd_pars))
             for nd in pt:
                 new_nd_lookup[nd] = part_node
 
@@ -1179,9 +1324,13 @@ class TypeAutomata:
 
         edge_set: set[tuple[int, int, AlphabetSymbol]] = set()
         for (src, dst, symb) in self.G.edges.data(TypeAutomata.SYMB_NAME):
+            print(symb)
             edge_set.add((new_nd_lookup[src], new_nd_lookup[dst], symb))
 
         for (src, dst, symb) in edge_set:
+            assert src in new_aut.G.nodes
+            assert dst in new_aut.G.nodes
+            print("adding edge ", symb)
             new_aut.add_edge(src, dst, symb)
 
         return new_aut

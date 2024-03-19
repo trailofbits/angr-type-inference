@@ -2,7 +2,7 @@
 # pylint:disable=missing-class-docstring,no-self-use
 import networkx as nx
 from angr.angrdb import AngrDB
-from angr.analyses.typehoon.algebraic_solver import ConstraintGenerator, Atom, TypeAutomata
+from angr.analyses.typehoon.algebraic_solver import ConstraintGenerator, Atom, TypeAutomata, RecordLabel
 from angr.analyses.typehoon import algebraic_solver
 from angr.analyses.typehoon.typevars import TypeConstraint, Subtype, Load, HasField, TypeVariable, DerivedTypeVariable, FuncIn
 __package__ = __package__ or "tests.analyses"  # pylint:disable=redefined-builtin
@@ -70,7 +70,7 @@ class TestTypehoon(unittest.TestCase):
         print(vr.var_to_typevars)
 
         solved = ConstraintGenerator(vr.type_constraints, 64)
-        print(solved.solved_types)
+        print(solved.solution)
         for s in [v for (k, v) in vr.var_to_typevars.items() if k.name == "s_10"]:
             for tv in s:
                 print("Have target tv:", tv)
@@ -92,8 +92,18 @@ class TestTypehoon(unittest.TestCase):
                     ty_aut.write("/tmp/built")
 
                     det_aut = ty_aut.detereminise()
+                    s = set(
+                        [nm for (_, _, nm) in det_aut.G.edges.data(TypeAutomata.SYMB_NAME)])
+                    assert RecordLabel(16) in s
+                    assert RecordLabel(32) in s
+                    assert RecordLabel(40) in s
                     min_aut = det_aut.minimise()
-                    nx.drawing.nx_pydot.write_dot(min_aut.G, "/tmp/dot")
+                    s = set(
+                        [nm for (_, _, nm) in min_aut.G.edges.data(TypeAutomata.SYMB_NAME)])
+                    assert RecordLabel(16) in s
+                    assert RecordLabel(32) in s
+                    assert RecordLabel(40) in s
+                    min_aut.write("/tmp/dot")
         assert False
 
     def test_smoketest(self):
