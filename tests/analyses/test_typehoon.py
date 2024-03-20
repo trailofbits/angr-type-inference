@@ -56,6 +56,24 @@ class TestTypehoon(unittest.TestCase):
             print(opt.optimize_ty(ty))
         assert False
 
+    def test_mooosl_typehoon(self):
+        db = AngrDB()
+        proj: angr.Project = db.load(os.path.join(
+            test_location, "x86_64", "mooosl.adb"))
+        vr = proj.analyses.VariableRecoveryFast(proj.kb.functions["lookup"])
+        proj.analyses.CompleteCallingConventions(proj.kb.functions["lookup"])
+        print(vr.type_constraints)
+
+        res = proj.analyses.Typehoon(vr.type_constraints, vr.func_typevar,
+                                     var_mapping=vr.var_to_typevars)
+
+        for s in [v for (k, v) in vr.var_to_typevars.items() if k.name == "s_10"]:
+            for tv in s:
+                print(res.solution[tv])
+
+        res2 = proj.analyses.Clinic(proj.kb.functions["lookup"])
+        assert (False)
+
     def test_mooosl(self):
         db = AngrDB()
         proj: angr.Project = db.load(os.path.join(

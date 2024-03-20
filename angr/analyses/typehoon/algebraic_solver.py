@@ -162,6 +162,7 @@ class Atom:
     lat_bkwd: nx.DiGraph
 
     def __init__(self, name: TypeConstant, lat_fwd: nx.DiGraph, lat_bkwd: nx.DiGraph) -> None:
+        assert not isinstance(name, TypehoonPointer)
         self.name = name
         self.lat_fwd = lat_fwd
         self.lat_bkwd = lat_bkwd
@@ -424,6 +425,12 @@ class UnificationPass:
         self.type_classes.add(ty1)
         return self.type_classes[ty1]
 
+    def safe_merge(self, x, y, can_swap=True):
+        self.type_classes.add(x)
+        self.type_classes.add(y)
+
+        self.type_classes.merge(x, y, can_swap=can_swap)
+
     def unify(self, ty1: ReprTy, ty2: ReprTy, can_swap=True):
         self.type_classes.add(ty1)
         self.type_classes.add(ty2)
@@ -431,16 +438,16 @@ class UnificationPass:
         x = self.type_classes[ty1]
         y = self.type_classes[ty2]
         if isinstance(x, VariableStorage):
-            self.type_classes.merge(
+            self.safe_merge(
                 y, x, can_swap=isinstance(y, VariableStorage) and can_swap)
             return
 
         if isinstance(y, VariableStorage):
-            self.type_classes.merge(
+            self.safe_merge(
                 x, y, can_swap=isinstance(x, VariableStorage) and can_swap)
             return
 
-        self.type_classes.merge(x, y, can_swap=can_swap)
+        self.safe_merge(x, y, can_swap=can_swap)
 
         def unify_dict_list(xit, yit):
             dlist_new = {}
@@ -461,10 +468,10 @@ class UnificationPass:
             case (Func(params=xps, return_val=xrs), Func(params=yps, return_val=yrs)):
                 ins = unify_dict_list(xps, yps)
                 outs = unify_dict_list(xrs, yrs)
-                self.type_classes.merge(Func(ins, outs), x, can_swap=False)
+                self.safe_merge(Func(ins, outs), x, can_swap=False)
             case (Record(fields=xf), Record(fields=yf)):
                 nf = unify_dict_list(xf, yf)
-                self.type_classes.merge(Record(nf), x, can_swap=False)
+                self.safe_merge(Record(nf), x, can_swap=False)
             # covariant on the load and contravariant on the store
             case (Pointer(store_tv=xstv, load_tv=xltv), Pointer(store_tv=ystv, load_tv=yltv)):
                 self.unify(xstv, ystv)
@@ -503,9 +510,14 @@ class UnificationPass:
                 nondef = {loc: prev_ty}
                 return (Func(nondef if isinstance(
                     label, FuncIn) else {}, nondef if isinstance(label, FuncOut) else {}), storage)
+            case ConvertTo():
+                # TODO(Ian): treating conversion as identity
+                return (prev_ty, storage)
             case _:
                 print(label)
-                assert False
+                # drop all cons
+                nty = self.fresh()
+                return (nty, nty)
 
     def type_of(self, ty: TypeVariable) -> ConsTy:
 
@@ -531,8 +543,9 @@ class UnificationPass:
                 return Bottom()
             case TypehoonTop():
                 return Top()
-            case TypehoonPointer():
-                return Atom(ty, self._lat, self._lat_inverted)
+            case TypehoonPointer(basetype=b):
+                child_ty = self.type_of(b)
+                return Pointer(child_ty, child_ty)
             case TypehoonFloat():
                 return Atom(ty, self._lat, self._lat_inverted)
             case TypehoonInt():
@@ -711,7 +724,7 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
         self.infer_types()
         # print(self.dump_state())
         # self.solved_types = self.coalesce_types()
-        # self.solution = self.build_solution()
+        self.solution = self.build_solution()
 
     def infer_types(self):
         uf = UnificationPass(self._base_lattice, self._base_lattice_inverted)
