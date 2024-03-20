@@ -172,6 +172,9 @@ class Atom:
     def __hash__(self) -> int:
         return hash(self.name)
 
+    def __repr__(self) -> str:
+        return f"Atom({self.name})"
+
     def translate(self, o: TypeConstant):
         match o:
             case TypehoonTop():
@@ -638,8 +641,9 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
             return self.build_function(nd, G, st.head_constructors.map_domain[FuncCons(dict(), dict()).ident], dict_nodes, st.polarity)
 
         if AtomicType(Top()).ident in st.head_constructors.map_domain:
-            at = st.head_constructors.map_domain[AtomicType(Top()).ident]
-            match at:
+            at: AtomicType = st.head_constructors.map_domain[AtomicType(
+                Top()).ident]
+            match at.atom:
                 case Atom(name=nm):
                     return nm
                 case Top():
