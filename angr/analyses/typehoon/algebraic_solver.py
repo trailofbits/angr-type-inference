@@ -179,7 +179,7 @@ class Atom:
             case TypehoonBot():
                 return Bottom()
             case _:
-                return o
+                return Atom(o, self.lat_fwd, self.lat_bkwd)
 
     def join(self, o: "Atom") -> "Atom":
         res = nx.lowest_common_ancestor(self.lat_bkwd, self.name, o.name)
@@ -594,7 +594,7 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
         tot = []
         for (x, pol) in [(self.collect_edges_of(nd, G, sym, dict_nodes, pol), pol)
                          for (sym, pol) in look_for]:
-            if x:
+            if x is not None:
                 tot.append(x)
             else:
                 tot.append(TypehoonTop() if pol else TypehoonBot())
@@ -604,7 +604,6 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
         s = self.get_or_replace_struct(nd)
         es = dict(zip(cons.fields, self.build_edges(nd, G, [(RecordLabel(v), pol)
                                                             for v in cons.fields], dict_nodes)))
-
         s.fields = es
         return s
 
@@ -665,7 +664,7 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
                         ty.G, scc)
                     maybe_ptr_edge = next(filter(
                         lambda x: x[2] == PointerCons(), self.find_internal_edges(ty.G, scc)), None)
-                    backup_edge = maybe_ptr_edge if maybe_ptr_edge else next(
+                    backup_edge = maybe_ptr_edge if maybe_ptr_edge is not None else next(
                         self.find_internal_edges(ty.G, scc))
                     if maybe_struct_edge:
                         ty.G.remove_edge(
@@ -679,7 +678,7 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
                         ty.add_edge(backup_edge[0], dst, backup_edge[2])
             if not cycles:
                 break
-
+        print(ty.entry)
         return self.build_angr_type_for_node(ty.entry, ty.G, ty.named_struct_nodes)
 
     def determine_type(self, r: ReprTy):
@@ -690,7 +689,8 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
         assert det_aut.entry in det_aut.G.nodes
         min_aut = det_aut.minimise()
         assert min_aut.entry in min_aut.G.nodes
-        return self.to_angr_type(min_aut)
+        res = self.to_angr_type(min_aut)
+        return res
 
     def build_solution(self):
         tot = dict()
@@ -705,7 +705,7 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
         self.infer_types()
         # print(self.dump_state())
         # self.solved_types = self.coalesce_types()
-        self.solution = self.build_solution()
+        # self.solution = self.build_solution()
 
     def infer_types(self):
         uf = UnificationPass(self._base_lattice, self._base_lattice_inverted)
@@ -802,7 +802,7 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
             nonlocal is_recursive
             nonlocal vcache
 
-            if vcache:
+            if vcache is not None:
                 return vcache
             is_recursive = True
             if isinstance(ty, VariableStorage):
@@ -943,19 +943,33 @@ class AtomicType(Constructor):
     def ident(self) -> ConstructorID:
         return 4
 
-    def join(self, o: "AtomicType") -> "AtomicType":
+    def _join(self, o: "AtomicType") -> "AtomicType":
         match (self.atom, o.atom):
             case (Top(), _) | (_, Top()):
-                return Atom(Top())
+                return Top()
             case (x, Bottom()):
-                return Atom(x)
+                return x
             case (Bottom(), x):
-                return Atom(x)
+                return x
             case (Atom(), Atom()):
                 return self.atom.join(o.atom)
 
+    def join(self, o: "AtomicType") -> "AtomicType":
+        return AtomicType(self._join(o))
+
     def meet(self, o: "AtomicType") -> "AtomicType":
-        return RecCons(self.fields.union(o.fields))
+        return AtomicType(self._meet(o))
+
+    def _meet(self, o: "AtomicType") -> "AtomicType":
+        match (self.atom, o.atom):
+            case (Bottom(), _) | (_, Bottom()):
+                return Bottom()
+            case (x, Top()):
+                return x
+            case (Top(), x):
+                return x
+            case (Atom(), Atom()):
+                return self.atom.meet(o.atom)
 
     def geq(self, o: "AtomicType") -> bool:
         match (self.atom, o.atom):
@@ -998,9 +1012,10 @@ class TypeLattice:
 
     def meet(self, x: "TypeLattice"):
         ks = set(x.map_domain.keys()).union(self.map_domain.keys())
+        print(ks)
 
         def maybe_meet(x: Optional[Constructor], y: Optional[Constructor]) -> Constructor:
-            if x and y:
+            if x is not None and y is not None:
                 return x.meet(y)
             elif x:
                 return x
@@ -1210,7 +1225,7 @@ class TypeAutomata:
         curr_state = None
         for nd in nds:
             st: AutState = self.G.nodes[nd][TypeAutomata.STATE_NAME]
-            if not pol:
+            if pol is None:
                 pol = st.polarity
                 curr_state = st
             else:
@@ -1218,7 +1233,6 @@ class TypeAutomata:
                 ncons = curr_state.head_constructors.join(
                     st.head_constructors) if pol else curr_state.head_constructors.meet(st.head_constructors)
                 curr_state = AutState(pol, ncons)
-
         return curr_state
 
     def detereminise(self):
@@ -1290,7 +1304,8 @@ class TypeAutomata:
     def write(self, pth):
         writeable_G = nx.MultiDiGraph()
         for nd in self.G.nodes:
-            writeable_G.add_node(nd)
+            writeable_G.add_node(nd, label=str(
+                self.G.nodes[nd][TypeAutomata.STATE_NAME]).replace(":", "_"))
 
         for (src, dst, symb) in self.G.edges(data=TypeAutomata.SYMB_NAME):
             writeable_G.add_edge(src, dst, label=str(symb))

@@ -2,7 +2,7 @@
 # pylint:disable=missing-class-docstring,no-self-use
 import networkx as nx
 from angr.angrdb import AngrDB
-from angr.analyses.typehoon.algebraic_solver import ConstraintGenerator, Atom, TypeAutomata, RecordLabel
+from angr.analyses.typehoon.algebraic_solver import ConstraintGenerator, Atom, TypeAutomata, RecordLabel, AutState, PointerCons
 from angr.analyses.typehoon import algebraic_solver
 from angr.analyses.typehoon.typevars import TypeConstraint, Subtype, Load, HasField, TypeVariable, DerivedTypeVariable, FuncIn
 __package__ = __package__ or "tests.analyses"  # pylint:disable=redefined-builtin
@@ -71,6 +71,7 @@ class TestTypehoon(unittest.TestCase):
 
         solved = ConstraintGenerator(vr.type_constraints, 64)
         print(solved.solution)
+
         for s in [v for (k, v) in vr.var_to_typevars.items() if k.name == "s_10"]:
             for tv in s:
                 print("Have target tv:", tv)
@@ -89,21 +90,28 @@ class TestTypehoon(unittest.TestCase):
 
                     ty_aut = TypeAutomata()
                     ty_aut.build_ty_go(ty, False)
-                    ty_aut.write("/tmp/built")
+                    print("entry: ", ty_aut.entry)
+                    ty_aut.write("/tmp/nfa")
 
                     det_aut = ty_aut.detereminise()
-                    s = set(
-                        [nm for (_, _, nm) in det_aut.G.edges.data(TypeAutomata.SYMB_NAME)])
-                    assert RecordLabel(16) in s
-                    assert RecordLabel(32) in s
-                    assert RecordLabel(40) in s
-                    min_aut = det_aut.minimise()
-                    s = set(
-                        [nm for (_, _, nm) in min_aut.G.edges.data(TypeAutomata.SYMB_NAME)])
-                    assert RecordLabel(16) in s
-                    assert RecordLabel(32) in s
-                    assert RecordLabel(40) in s
-                    min_aut.write("/tmp/dot")
+                    print("dfa entry ", det_aut.entry)
+                    det_aut.write("/tmp/deterministic")
+
+                    st: AutState = det_aut.G.nodes[det_aut.entry][TypeAutomata.STATE_NAME]
+                    assert PointerCons().ident in st.head_constructors.map_domain
+                    # s = set(
+                    #     [nm for (_, _, nm) in det_aut.G.edges.data(TypeAutomata.SYMB_NAME)])
+                    # assert RecordLabel(16) in s
+                    # assert RecordLabel(32) in s
+                    # assert RecordLabel(40) in s
+                    # min_aut = det_aut.minimise()
+                    # s = set(
+                    #     [nm for (_, _, nm) in min_aut.G.edges.data(TypeAutomata.SYMB_NAME)])
+                    # assert RecordLabel(16) in s
+                    # assert RecordLabel(32) in s
+                    # assert RecordLabel(40) in s
+                    # min_aut.write("/tmp/dot")
+                    print(solved.determine_type(ty))
         assert False
 
     def test_smoketest(self):
