@@ -582,7 +582,7 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
     def select_named_struct_edge(self, G: nx.MultiDiGraph, scc: set[int]) -> Optional[tuple[int, int, "AlphabetSymbol"]]:
         for (src, dst, symb) in self.find_internal_edges(G, scc):
             st: AutState = G.nodes[dst][TypeAutomata.STATE_NAME]
-            if RecCons(pset()).ident in st.head_constructors.map_domain and symb == PointerCons():
+            if RecCons(pset()).ident in st.head_constructors.map_domain and (symb == LoadLabel() or symb == StoreLabel()):
                 return (src, dst, symb)
         return None
 
@@ -626,7 +626,7 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
     def build_angr_type_for_node(self, nd: int,  G: nx.MultiDiGraph, dict_nodes: dict[int, int]) -> TypeConstant:
         st: AutState = G.nodes[nd][TypeAutomata.STATE_NAME]
         if nd in dict_nodes:
-            return self.get_or_replace_struct(nd)
+            return self.get_or_replace_struct(dict_nodes[nd])
 
         if RecCons(pset()).ident in st.head_constructors.map_domain:
             return self.build_record(nd, G, st.head_constructors.map_domain[RecCons(pset()).ident], dict_nodes, st.polarity)
@@ -662,6 +662,7 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
                     cycles = True
                     maybe_struct_edge = self.select_named_struct_edge(
                         ty.G, scc)
+                    print("Sty edge: ", maybe_struct_edge)
                     maybe_ptr_edge = next(filter(
                         lambda x: x[2] == PointerCons(), self.find_internal_edges(ty.G, scc)), None)
                     backup_edge = maybe_ptr_edge if maybe_ptr_edge is not None else next(
@@ -670,7 +671,8 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
                         ty.G.remove_edge(
                             maybe_struct_edge[0], maybe_struct_edge[1])
                         rec = ty.add_named_struct_node(maybe_struct_edge[1])
-                        ty.add_edge(maybe_struct_edge[0], rec, PointerCons())
+                        ty.add_edge(
+                            maybe_struct_edge[0], rec, maybe_struct_edge[2])
                     else:
                         ty.G.remove_edge(backup_edge[0], backup_edge[1])
                         dst = ty.add_singleton_node(
@@ -1109,7 +1111,7 @@ class TypeAutomata:
     def add_named_struct_node(self, target: int) -> int:
         ndid = self.fresh_node_id()
         self.named_struct_nodes[ndid] = target
-        self.G.add_node(ndid)
+        self.G.add_node(ndid, **{TypeAutomata.STATE_NAME: None})
         return ndid
 
     def fresh_node_id(self) -> int:
