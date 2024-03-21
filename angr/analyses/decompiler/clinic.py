@@ -8,7 +8,7 @@ from typing import Dict, List, Tuple, Set, Optional, Iterable, Union, Type, Any,
 import networkx
 
 import ailment
-
+from ...analyses.typehoon.simple_solver import SimpleSolver
 from ...knowledge_base import KnowledgeBase
 from ...knowledge_plugins.functions import Function
 from ...knowledge_plugins.cfg.memory_data import MemoryDataSort
@@ -93,12 +93,13 @@ class Clinic(Analysis):
         rewrite_ites_to_diamonds=True,
         cache: Optional["DecompilationCache"] = None,
         mode: ClinicMode = ClinicMode.DECOMPILE,
+        solver_builder = SimpleSolver
     ):
         if not func.normalized and mode == ClinicMode.DECOMPILE:
             raise ValueError("Decompilation must work on normalized function graphs.")
 
         self.function = func
-
+        self.solver_builder = solver_builder
         self.graph = None
         self.cc_graph: Optional[networkx.DiGraph] = None
         self.arg_list = None
@@ -1159,6 +1160,7 @@ class Clinic(Analysis):
                 var_mapping=vr.var_to_typevars,
                 must_struct=must_struct,
                 ground_truth=groundtruth,
+                solver_builder = self.solver_builder
             )
             # tp.pp_constraints()
             # tp.pp_solution()

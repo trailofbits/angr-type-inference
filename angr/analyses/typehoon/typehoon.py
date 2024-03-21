@@ -36,6 +36,7 @@ class Typehoon(Analysis):
         ground_truth=None,
         var_mapping: Optional[Dict["SimVariable", Set["TypeVariable"]]] = None,
         must_struct: Optional[Set["TypeVariable"]] = None,
+        solver_builder = SimpleSolver
     ):
         """
 
@@ -53,6 +54,7 @@ class Typehoon(Analysis):
         self._must_struct = must_struct
 
         self.bits = self.project.arch.bits
+        self.solver_builder = solver_builder
         self.solution = None
         self.structs = None
         self.simtypes_solution = None
@@ -140,7 +142,7 @@ class Typehoon(Analysis):
             translator = TypeTranslator(arch=self.project.arch)
             for tv, sim_type in self._ground_truth.items():
                 self._constraints[self.func_var].add(Equivalence(tv, translator.simtype2tc(sim_type)))
-                
+
         self._solve()
         self._specialize()
         self._translate_to_simtypes()
@@ -162,8 +164,8 @@ class Typehoon(Analysis):
                         typevars.add(constraint.sub_type)
                     if isinstance(constraint.super_type, TypeVariable):
                         typevars.add(constraint.super_type)
-        solver = algebraic_solver.ConstraintGenerator(self._constraints, self.bits)
-        #solver = SimpleSolver(self.bits, self._constraints, typevars)
+        #solver = algebraic_solver.ConstraintGenerator(self._constraints, self.bits)
+        solver = self.solver_builder(self.bits, self._constraints, typevars)
         self.solution = solver.solution
 
     def _specialize(self):
