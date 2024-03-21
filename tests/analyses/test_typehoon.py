@@ -62,14 +62,14 @@ class TestTypehoon(unittest.TestCase):
             test_location, "x86_64", "mooosl.adb"))
         vr = proj.analyses.VariableRecoveryFast(proj.kb.functions["lookup"])
         proj.analyses.CompleteCallingConventions(proj.kb.functions["lookup"])
-        print(vr.type_constraints)
+        #print(vr.type_constraints)
 
-        res = proj.analyses.Typehoon(vr.type_constraints, vr.func_typevar,
-                                     var_mapping=vr.var_to_typevars)
+        #res = proj.analyses.Typehoon(vr.type_constraints, vr.func_typevar,
+        #                             var_mapping=vr.var_to_typevars)
 
-        for s in [v for (k, v) in vr.var_to_typevars.items() if k.name == "s_10"]:
-            for tv in s:
-                print(res.solution[tv])
+        #for s in [v for (k, v) in vr.var_to_typevars.items() if k.name == "s_10"]:
+        #    for tv in s:
+        #        print(res.solution[tv])
 
         res2 = proj.analyses.Clinic(proj.kb.functions["lookup"])
         assert (False)

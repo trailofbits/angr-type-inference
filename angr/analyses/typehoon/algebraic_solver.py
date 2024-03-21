@@ -14,12 +14,14 @@ import copy
 import itertools
 from pyrsistent import m, pmap, PMap, pset, PSet
 from collections import defaultdict
+from . import typeconsts
 from .typeconsts import TopType as TypehoonTop, BottomType as TypehoonBot, Int as TypehoonInt, FloatBase as TypehoonFloat, Pointer as TypehoonPointer, Struct as TypehoonStruct, Function as TypehoonFunc, Pointer32 as TypehoonPointer32, Pointer64 as TypehoonPointer64
 import networkx as nx
 # Import labels
 from .typevars import FuncIn, FuncOut, Load, Store, ConvertTo, HasField, BaseLabel
 from typing import TypeVar, Callable, Optional, Generator
 from collections import deque
+from sortedcontainers import SortedDict
 # A type variable is a unique holder of constraints
 
 
@@ -249,9 +251,15 @@ def string_of_d_as_args(d: dict[int, "ConsTy"]) -> str:
     return bs
 
 
+@dataclass(frozen=True, order=True)
+class FieldCapability:
+    offset: int
+    size: int
+
+
 @dataclass(frozen=False, init=False, unsafe_hash=True, eq=True)
 class Record:
-    fields: PMap[int, "ConsTy"]
+    fields: PMap[FieldCapability, "ConsTy"]
 
     def __init__(self, d) -> None:
         self.fields = pmap(d)
@@ -418,7 +426,6 @@ class UnificationPass:
             # covariant on the load and contravariant on the store
             case Pointer(store_tv=ystv, load_tv=yltv):
                 return Pointer(self.render(ystv), self.render(yltv))
-        print(rep)
         assert False
 
     def safe_get(self, ty1: ReprTy):
@@ -505,7 +512,7 @@ class UnificationPass:
                 return Pointer(prev_ty, load)
             case HasField(bits=sz, offset=off):
                 # TODO(Ian): we should allow for refining an atom by a sz or something
-                return (Record({off: prev_ty}), storage)
+                return (Record({FieldCapability(off, sz): prev_ty}), storage)
             case FuncIn(loc=loc) | FuncOut(loc=loc):
                 nondef = {loc: prev_ty}
                 return (Func(nondef if isinstance(
@@ -514,10 +521,7 @@ class UnificationPass:
                 # TODO(Ian): treating conversion as identity
                 return (prev_ty, storage)
             case _:
-                print(label)
-                # drop all cons
-                nty = self.fresh()
-                return (nty, nty)
+                assert False
 
     def type_of(self, ty: TypeVariable) -> ConsTy:
 
@@ -526,7 +530,6 @@ class UnificationPass:
 
         def get_ty_var(bv: TypeVariable) -> VariableStorage:
             if not (bv in self.base_var_map):
-                print("Injecting ", bv)
                 self.base_var_map[bv] = self.fresh()
             return self.base_var_map[bv]
 
@@ -589,7 +592,6 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
         self.infer_types()
 
     def find_internal_edges(self, G: nx.MultiDiGraph, scc: set[int]) -> Generator[tuple[int, int, "AlphabetSymbol"], None, None]:
-        print(scc)
         for nd in scc:
             for (src, dst, symb) in G.out_edges(nd, data=TypeAutomata.SYMB_NAME):
                 if dst in scc:
@@ -620,7 +622,39 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
         s = self.get_or_replace_struct(nd)
         es = dict(zip(cons.fields, self.build_edges(nd, G, [(RecordLabel(v), pol)
                                                             for v in cons.fields], dict_nodes)))
-        s.fields = es
+        # greedily select a nonoverlapping set of fields
+        by_size = sorted(list(es.keys()), key=lambda x: x.size, reverse=True)
+        covered: SortedDict[int, int] = SortedDict()
+        for elem in by_size:
+            # this either points to the element less than equal to current or -1 if there is none
+            leqkey = covered.bisect_right(elem.offset) - 1
+            gt = leqkey + 1
+
+            does_overlap = False
+
+            if leqkey >= 0:
+                (ltelem_start, lt_elem_size) = covered.peekitem(leqkey)
+                does_overlap |= not (
+                    elem.offset >= ltelem_start + lt_elem_size//8)
+
+            if gt < len(covered):
+                (gtelem_start, _) = covered.peekitem(gt)
+                does_overlap |= not (
+                    elem.offset + (elem.size//8) <= gtelem_start)
+
+            if not does_overlap:
+                covered[elem.offset] = elem.size
+
+        new_fields = {}
+
+        for (offset, size) in covered.items():
+            current_type = es[FieldCapability(offset, size)]
+            if isinstance(current_type, TypehoonBot) or isinstance(current_type, TypehoonTop):
+                nty = typeconsts.int_type(size)
+                if nty is not None:
+                    current_type = nty
+            new_fields[offset] = current_type
+        s.fields = new_fields
         return s
 
     def build_pointer(self, nd: int,  G: nx.MultiDiGraph, dict_nodes, pol: bool) -> TypehoonPointer:
@@ -679,7 +713,6 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
                     cycles = True
                     maybe_struct_edge = self.select_named_struct_edge(
                         ty.G, scc)
-                    print("Sty edge: ", maybe_struct_edge)
                     maybe_ptr_edge = next(filter(
                         lambda x: x[2] == PointerCons(), self.find_internal_edges(ty.G, scc)), None)
                     backup_edge = maybe_ptr_edge if maybe_ptr_edge is not None else next(
@@ -697,16 +730,21 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
                         ty.add_edge(backup_edge[0], dst, backup_edge[2])
             if not cycles:
                 break
-        print(ty.entry)
         return self.build_angr_type_for_node(ty.entry, ty.G, ty.named_struct_nodes)
 
-    def determine_type(self, r: ReprTy):
+    def determine_type(self, r: ReprTy, k: TypeVariable):
         aut = TypeAutomata()
+        with open(f"/tmp/{k}_repr", "w") as f:
+            f.write(str(r))
+
         aut.build_ty_go(r, False)
         assert aut.entry in aut.G.nodes
+        aut.write(f"/tmp/{k}_aut")
         det_aut = aut.detereminise()
+        det_aut.write(f"/tmp/{k}_det_aut")
         assert det_aut.entry in det_aut.G.nodes
         min_aut = det_aut.minimise()
+        min_aut.write(f"/tmp/{k}_min_aut")
         assert min_aut.entry in min_aut.G.nodes
         res = self.to_angr_type(min_aut)
         return res
@@ -716,7 +754,7 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
         for k in self.base_var_map:
             ctype = self.coalesce_acc(
                 self.base_var_map[k], pmap(), False)
-            tot[k] = self.determine_type(ctype)
+            tot[k] = self.determine_type(ctype, k)
         return tot
 
     def solve_subtyping_constraints(self, constraints: Set["TypeConstraint"]):
@@ -921,7 +959,7 @@ class FVCons(Constructor):
 
 @dataclass(frozen=True)
 class RecCons(Constructor):
-    fields: PSet[int]
+    fields: PSet[FieldCapability]
 
     @property
     def ident(self) -> ConstructorID:
@@ -1031,7 +1069,6 @@ class TypeLattice:
 
     def meet(self, x: "TypeLattice"):
         ks = set(x.map_domain.keys()).union(self.map_domain.keys())
-        print(ks)
 
         def maybe_meet(x: Optional[Constructor], y: Optional[Constructor]) -> Constructor:
             if x is not None and y is not None:
@@ -1063,7 +1100,7 @@ class Epsilon(AlphabetSymbol):
 
 @dataclass(frozen=True)
 class RecordLabel(AlphabetSymbol):
-    label: int
+    label: FieldCapability
 
 
 @dataclass(frozen=True)
@@ -1204,7 +1241,6 @@ class TypeAutomata:
             case Record(fields=fs):
                 par = self.add_singleton_node(r, polarity, RecCons(
                     pset(fs.keys())))
-                print(fs)
                 add_dict(fs, polarity, RecordLabel, par)
                 return par
             case FinalVar():
@@ -1222,8 +1258,6 @@ class TypeAutomata:
         if not self.epsilon_subgraph:
             self.epsilon_subgraph = self.G.edge_subgraph(
                 [e for e in self.G.edges if self.G.edges[e][TypeAutomata.SYMB_NAME] == Epsilon()])
-            assert Epsilon() == Epsilon()
-            print("Epsilon edges", self.epsilon_subgraph.edges())
         if not (x in self.epsilon_subgraph.nodes):
             return pset([x])
         return pset(nx.dfs_preorder_nodes(self.epsilon_subgraph, source=x)).add(x)
@@ -1262,7 +1296,6 @@ class TypeAutomata:
 
         ent_nodes = self.reachable_by_epsilon(self.entry)
         q.append(ent_nodes)
-        print("Ent nodes: ", ent_nodes)
         new_aut.entry = new_aut.add_subnode(
             ent_nodes, self.merge_nodes(ent_nodes))
         handled_nds[ent_nodes] = new_aut.entry
@@ -1358,13 +1391,11 @@ class TypeAutomata:
 
         edge_set: set[tuple[int, int, AlphabetSymbol]] = set()
         for (src, dst, symb) in self.G.edges.data(TypeAutomata.SYMB_NAME):
-            print(symb)
             edge_set.add((new_nd_lookup[src], new_nd_lookup[dst], symb))
 
         for (src, dst, symb) in edge_set:
             assert src in new_aut.G.nodes
             assert dst in new_aut.G.nodes
-            print("adding edge ", symb)
             new_aut.add_edge(src, dst, symb)
 
         return new_aut

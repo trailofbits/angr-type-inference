@@ -4,6 +4,7 @@ from typing import List, Set, Optional, Dict, Union, TYPE_CHECKING
 from ...sim_type import SimStruct, SimTypePointer, SimTypeArray
 from ..analysis import Analysis, AnalysesHub
 from .simple_solver import SimpleSolver
+from . import algebraic_solver
 from .translator import TypeTranslator
 from .typeconsts import Struct, Pointer, TypeConstant, Array, TopType
 from .typevars import Equivalence, Subtype, TypeVariable
@@ -139,7 +140,7 @@ class Typehoon(Analysis):
             translator = TypeTranslator(arch=self.project.arch)
             for tv, sim_type in self._ground_truth.items():
                 self._constraints[self.func_var].add(Equivalence(tv, translator.simtype2tc(sim_type)))
-
+                
         self._solve()
         self._specialize()
         self._translate_to_simtypes()
@@ -161,7 +162,8 @@ class Typehoon(Analysis):
                         typevars.add(constraint.sub_type)
                     if isinstance(constraint.super_type, TypeVariable):
                         typevars.add(constraint.super_type)
-        solver = SimpleSolver(self.bits, self._constraints, typevars)
+        solver = algebraic_solver.ConstraintGenerator(self._constraints, self.bits)
+        #solver = SimpleSolver(self.bits, self._constraints, typevars)
         self.solution = solver.solution
 
     def _specialize(self):
