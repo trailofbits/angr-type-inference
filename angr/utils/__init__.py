@@ -1,5 +1,5 @@
 from .timing import timethis
-from . import graph
+# from . import graph
 from . import constants
 from . import enums_conv
 from . import lazy_import
@@ -14,7 +14,8 @@ def looks_like_sql(s: str) -> bool:
     :return:        True if the string looks like an SQL, False otherwise.
     """
 
-    sql_keywords = {"select", "update", "union", "delete", "from", "table", "insert", "into"}
+    sql_keywords = {"select", "update", "union",
+                    "delete", "from", "table", "insert", "into"}
 
     s = s.lower()
     for k in sql_keywords:
@@ -26,7 +27,7 @@ def looks_like_sql(s: str) -> bool:
                 if before not in " /;":
                     continue
             # what's after k? is it a whitespace?
-            following = s[k_index + len(k) :]
+            following = s[k_index + len(k):]
             if not following or following.startswith(" "):
                 return True
 

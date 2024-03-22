@@ -15,10 +15,10 @@ import itertools
 from pyrsistent import m, pmap, PMap, pset, PSet
 from collections import defaultdict
 from . import typeconsts
-from .typeconsts import TopType as TypehoonTop, BottomType as TypehoonBot, Int as TypehoonInt, FloatBase as TypehoonFloat, Pointer as TypehoonPointer, Struct as TypehoonStruct, Function as TypehoonFunc, Pointer32 as TypehoonPointer32, Pointer64 as TypehoonPointer64
+from .typeconsts import TopType as TypehoonTop, BottomType as TypehoonBot, Int as TypehoonInt, FloatBase as TypehoonFloat, Pointer as TypehoonPointer, Struct as TypehoonStruct, Function as TypehoonFunc, Pointer32 as TypehoonPointer32, Pointer64 as TypehoonPointer64, Array as TypehoonArray
 import networkx as nx
 # Import labels
-from .typevars import FuncIn, FuncOut, Load, Store, ConvertTo, HasField, BaseLabel
+from .typevars import FuncIn, FuncOut, Load, Store, ConvertTo, HasField, BaseLabel, AddN
 from typing import TypeVar, Callable, Optional, Generator
 from collections import deque
 from sortedcontainers import SortedDict
@@ -509,7 +509,7 @@ class UnificationPass:
             case Store():
                 load = self.fresh()
                 self.constrain(prev_ty, load)
-                return Pointer(prev_ty, load)
+                return (Pointer(prev_ty, load), storage)
             case HasField(bits=sz, offset=off):
                 # TODO(Ian): we should allow for refining an atom by a sz or something
                 return (Record({FieldCapability(off, sz): prev_ty}), storage)
@@ -521,7 +521,9 @@ class UnificationPass:
                 # TODO(Ian): treating conversion as identity
                 return (prev_ty, storage)
             case _:
-                assert False
+                # TODO(Ian): this forgets capabilities following an add
+                print(label)
+                return (self.fresh(), storage)
 
     def type_of(self, ty: TypeVariable) -> ConsTy:
 
@@ -555,7 +557,9 @@ class UnificationPass:
                 return Atom(ty, self._lat, self._lat_inverted)
             case _:
                 print(ty)
-                assert False
+                # TODO(Ian): there are cases here that we should probably expand out into types: ie. lifting arrays and structures maybe, apriori arrays can just be a base lattice element or something
+                # at worst we could downgrade to a ptr.
+                return Bottom()
 
 
 class ConstraintGenerator(BaseSolver, VariableHandler):
@@ -778,6 +782,11 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
 
         self.base_var_map = uf.build_base_vars()
         for (eq, to) in self._equivalence.items():
+            # there may be an equivalence for which there were no constraint uses...
+            # this is quite a boring case since these vars will be unconstrained
+            # TODO(Ian): should we unify here im pretty sure it would be useless?
+            if to not in self.base_var_map:
+                self.base_var_map[to] = uf.fresh()
             self.base_var_map[eq] = self.base_var_map[to]
 
         for (lhs, rhs) in uf.build_constraints():

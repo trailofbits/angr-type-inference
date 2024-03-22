@@ -86,7 +86,6 @@ class Typehoon(Analysis):
                     name = None
                     if isinstance(type_, SimStruct):
                         name = type_.name
-
                     self.kb.variables[func_addr].set_variable_type(var, type_, name=name)
 
     def pp_constraints(self) -> None:

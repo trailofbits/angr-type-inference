@@ -4,7 +4,7 @@ import logging
 import enum
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Set, Optional, Iterable, Union, Type, Any, NamedTuple, TYPE_CHECKING
-
+import time
 import networkx
 
 import ailment
@@ -128,6 +128,7 @@ class Clinic(Analysis):
         self._register_save_areas_removed: bool = False
 
         self._new_block_addrs = set()
+        self.ns_time_spent_in_type_inference = 0
 
         # sanity checks
         if not self.kb.functions:
@@ -1124,6 +1125,7 @@ class Clinic(Analysis):
     def _recover_and_link_variables(self, ail_graph, arg_list):
         # variable recovery
         tmp_kb = KnowledgeBase(self.project) if self.variable_kb is None else self.variable_kb
+        tmp_kb.variables.load_from_dwarf()
         tmp_kb.functions = self.kb.functions
         vr = self.project.analyses.VariableRecoveryFast(
             self.function,  # pylint:disable=unused-variable
@@ -1153,6 +1155,7 @@ class Clinic(Analysis):
         else:
             must_struct = None
         try:
+            before = time.perf_counter_ns()
             tp = self.project.analyses.Typehoon(
                 vr.type_constraints,
                 vr.func_typevar,
@@ -1162,6 +1165,8 @@ class Clinic(Analysis):
                 ground_truth=groundtruth,
                 solver_builder = self.solver_builder
             )
+            after = time.perf_counter_ns()
+            self.ns_time_spent_in_type_inference = after - before
             # tp.pp_constraints()
             # tp.pp_solution()
             tp.update_variable_types(
