@@ -26,6 +26,8 @@ import typing
 import itertools
 from archinfo import Arch
 from sortedcontainers import SortedDict
+import pickle
+from pyrsistent import pset, PSet
 
 
 def run_with_timeout(timeout_secs: int, f, args) -> Any:
@@ -39,6 +41,7 @@ def run_with_timeout(timeout_secs: int, f, args) -> Any:
     proc.start()
     start = time.perf_counter()
     while True:
+        time.sleep(1)
         if not proc.is_alive():
             return res
         diff = time.perf_counter() - start
@@ -49,6 +52,7 @@ def run_with_timeout(timeout_secs: int, f, args) -> Any:
 @dataclass
 class VTypesForFunction:
     func: Function
+    func_size: int
     fty: SimTypeFunction
     ns_time_spent_during_type_inference: int
 
@@ -56,32 +60,20 @@ class VTypesForFunction:
 @dataclass
 class CompResult:
     func: Function
+    func_size: int
     ns_time_spent_during_inference: int
     recoverd_fty: SimTypeFunction
     ground_truth_type: SimTypeFunction
     arch: Arch
 
 
-def collect_variable_types_for_function(func: Function, project: angr.Project) -> None | VTypesForFunction:
-    tmp_kb = KnowledgeBase(project)
-    tmp_kb.variables.load_from_dwarf()
-    print("old", func.prototype)
-    try:
-        cres = project.analyses.Clinic(
-            func, solver_builder=lambda bits, constraints, typevars: ConstraintGenerator(constraints, bits), variable_kb=tmp_kb)
-        # func, solver_builder=SimpleSolver)
-    except:
-        return None
-    # print(cres.ns_time_spent_in_type_inference)
-    if cres.ns_time_spent_in_type_inference == 0:
-        return None
-
-    print("new", func.prototype)
-    vtyf = VTypesForFunction(func, func.prototype,
-                             cres.ns_time_spent_in_type_inference)
-    # Clinic should pick a prototype
-
-    return vtyf
+@dataclass
+class ComparisonData:
+    binary_name: str
+    func_addr: int
+    func_size: int
+    type_distance: float
+    ns_time_spent_during_inference: int
 
 
 @dataclass
@@ -141,6 +133,24 @@ class StructOffsets:
         return does_overlap
 
 
+@dataclass
+class CompState:
+    ground: PSet[VariableType]
+    predicted: PSet[TypeConstant]
+
+    def add_predicted(self, t: TypeConstant):
+        return CompState(self.ground, self.predicted.add(t))
+
+    def add_ground(self, t: VariableType):
+        return CompState(self.ground.add(t), self.predicted)
+
+    def contains_predicted(self, t: TypeConstant):
+        return t in self.predicted
+
+    def contains_ground(self, g):
+        return g in self.ground
+
+
 class TypeComparison:
     """
     Environment for comparison of two types, requires the type map for the binary for typedefs
@@ -192,7 +202,7 @@ class TypeComparison:
 
         return TypehoonBot()
 
-    def type_distance(self, t1: TypeConstant, t2: VariableType) -> float:
+    def type_distance(self, t1: TypeConstant, t2: VariableType, st: CompState) -> float:
         """
         Compute the distance between types 
 
@@ -209,12 +219,16 @@ class TypeComparison:
         - BottomGroundType
 
         """
+        if st.contains_predicted(t1) or st.contains_ground(t2):
+            return 0.0
+
+        st = st.add_predicted(t1).add_ground(t2)
 
         def comp_list(lst1: list[TypeConstant], lst2: list[VariableType]):
             total_dist = 0.0
             num = 0
             for (x, y) in zip(lst1, lst2):
-                total_dist += self.type_distance(x, y)
+                total_dist += self.type_distance(x, y, st)
                 num += 1
 
             diff = abs(len(lst1) - len(lst2))
@@ -246,9 +260,9 @@ class TypeComparison:
                 # unions
                 return 0
             case (_, TypedefType()):
-                return self.type_distance(t1, self.type_of_tdef(t2))
+                return self.type_distance(t1, self.type_of_tdef(t2), st)
             case (TypehoonPointer(), PointerType()):
-                return self.type_distance(t1.basetype,  t2.referenced_type)
+                return self.type_distance(t1.basetype,  t2.referenced_type, st)
             case (TypehoonStruct(), StructType()):
                 # we just take the average distance on fields assuming unmatched fields have max dist
 
@@ -277,7 +291,7 @@ class TypeComparison:
                     return 0.0
                 return total_fld_dist/total_compare
             case (TypehoonArray(), ArrayType()):
-                return self.type_distance(t1.element, t2.element_type)
+                return self.type_distance(t1.element, t2.element_type, st)
             case (_, BaseType()):
                 if t1 in self.base_lattice:
                     return self.base_type_distance(t1, t2)
@@ -288,59 +302,92 @@ class TypeComparison:
                 return self.max_dist
 
 
-def eval_bin(target_bin):
-    path = pathlib.Path(target_bin).resolve().absolute()
-    proj = angr.Project(path, auto_load_libs=False, load_debug_info=True)
-    # hack if it's relocatable we load it at 0 so dwarf offsets line up
-    if proj.loader.main_object.is_relocatable:
-        proj = angr.Project(path, auto_load_libs=False,
-                            load_debug_info=True, main_opts={"base_addr": 0})
-    print(proj.loader.main_object)
-    proj.analyses.CFGFast(normalize=True, data_references=True)
-    proj.analyses.CompleteCallingConventions(
-        recover_variables=True, analyze_callsites=True)
+class Evaler:
+    def __init__(self, algebriac: bool) -> None:
+        self._algebriac = algebriac
 
-    # so we ensure that we have the same variables as dwarf here
-    # angr doesnt populate types from dwarf so this doesnt affect type inference
-    proj.kb.variables.load_from_dwarf()
+    def collect_variable_types_for_function(self, func: Function, project: angr.Project) -> None | VTypesForFunction:
+        tmp_kb = KnowledgeBase(project)
+        tmp_kb.variables.load_from_dwarf()
 
-    vtypes_for_functions: list[VTypesForFunction] = []
-    for (_, func) in proj.kb.functions.items():
-        r = collect_variable_types_for_function(func, proj)
-        if r is not None:
-            vtypes_for_functions.append(r)
+        cons_len = None
 
-    assert func.project is not None
-    sigs: dict[int, SimTypeFunction] = {}
-    for cu in proj.loader.main_object.compilation_units:
-        for (low_pc, f) in cu.functions.items():
-            dwarf_sig_args = []
-            for v in f.local_variables:
-                if v.is_parameter:
-                    dwarf_sig_args.append(v.type)
-            retty = None
-            if f.type_offset is not None and f.type_offset in proj.loader.main_object.type_list:
-                retty = proj.loader.main_object.type_list[f.type_offset]
-            sigs[low_pc] = SimTypeFunction(dwarf_sig_args, retty)
-    print(sigs)
-    rectypes = []
-    for vtype in vtypes_for_functions:
-        if vtype is not None:
-            if vtype.func.addr in sigs:
-                groundsig = sigs[vtype.func.addr]
-                rectypes.append(CompResult(
-                    func, vtype.ns_time_spent_during_type_inference, vtype.fty, groundsig, func.project.arch))
-    return rectypes
+        def bldr(bits, constraints, typevars):
+            nonlocal cons_len
+            subbldr = (lambda bits, constraints, typevars: ConstraintGenerator(
+                constraints, bits)) if self._algebriac else SimpleSolver
+            cons_len = len(constraints)
+            return subbldr(bits, constraints, typevars)
+        try:
+            cres = project.analyses.Clinic(
+                func, solver_builder=bldr, variable_kb=tmp_kb)
+            # func, solver_builder=SimpleSolver)
+        except:
+            return None
+        # print(cres.ns_time_spent_in_type_inference)
+        if cres.ns_time_spent_in_type_inference == 0:
+            return None
 
+        vtyf = VTypesForFunction(func, cons_len, func.prototype,
+                                 cres.ns_time_spent_in_type_inference)
+        # Clinic should pick a prototype
 
-def eval_bin_withtimeout(target_dir):
-    return run_with_timeout(360, eval_bin, [target_dir])
+        return vtyf
+
+    def eval_bin(self, target_bin):
+        path = pathlib.Path(target_bin).resolve().absolute()
+        proj = angr.Project(path, auto_load_libs=False, load_debug_info=True)
+        # hack if it's relocatable we load it at 0 so dwarf offsets line up
+        if proj.loader.main_object.is_relocatable:
+            proj = angr.Project(path, auto_load_libs=False,
+                                load_debug_info=True, main_opts={"base_addr": 0})
+        print(proj.loader.main_object)
+        proj.analyses.CFGFast(normalize=True, data_references=True)
+        proj.analyses.CompleteCallingConventions(
+            recover_variables=True, analyze_callsites=True)
+
+        # so we ensure that we have the same variables as dwarf here
+        # angr doesnt populate types from dwarf so this doesnt affect type inference
+        proj.kb.variables.load_from_dwarf()
+
+        vtypes_for_functions: list[VTypesForFunction] = []
+        for (_, func) in proj.kb.functions.items():
+            r = self.collect_variable_types_for_function(func, proj)
+            if r is not None:
+                vtypes_for_functions.append(r)
+
+        assert func.project is not None
+        sigs: dict[int, SimTypeFunction] = {}
+        for cu in proj.loader.main_object.compilation_units:
+            for (low_pc, f) in cu.functions.items():
+                dwarf_sig_args = []
+                for v in f.local_variables:
+                    if v.is_parameter:
+                        dwarf_sig_args.append(v.type)
+                retty = None
+                if f.type_offset is not None and f.type_offset in proj.loader.main_object.type_list:
+                    retty = proj.loader.main_object.type_list[f.type_offset]
+                sigs[low_pc] = SimTypeFunction(dwarf_sig_args, retty)
+        print(sigs)
+        rectypes = []
+        for vtype in vtypes_for_functions:
+            if vtype is not None:
+                if vtype.func.addr in sigs:
+                    groundsig = sigs[vtype.func.addr]
+                    rectypes.append(CompResult(
+                        vtype.func,  vtype.func_size, vtype.ns_time_spent_during_type_inference, vtype.fty, groundsig, func.project.arch))
+        return rectypes
+
+    def eval_bin_withtimeout(self, target_dir):
+        return (os.path.basename(target_dir), run_with_timeout(360, self.eval_bin, [target_dir]))
 
 
 def main():
     prser = argparse.ArgumentParser()
     prser.add_argument("target_dir")
     prser.add_argument("-n", default=0, type=int)
+    prser.add_argument("-out", required=True)
+    prser.add_argument("-algebraic_solver", default=False, action="store_true")
     args = prser.parse_args()
 
     tgts = []
@@ -349,26 +396,28 @@ def main():
             tgts.append(os.path.join(args.target_dir, x))
 
     max_len = len(tgts) if args.n == 0 else min(args.n, len(tgts))
+    evaler = Evaler(args.algebraic_solver)
     with Pool() as p:
         lst: list[CompResult] = list(
-            tqdm.tqdm(p.imap(eval_bin_withtimeout, tgts[0:max_len]),  total=len(tgts)))
+            tqdm.tqdm(p.imap(evaler.eval_bin_withtimeout, tgts[0:max_len]),  total=len(tgts)))
 
-        total_tdist = 0.0
-        total_comps = 0
+        tot = []
+        for (bin_name, comps) in lst:
+            if comps is not None:
+                for comp in comps:
+                    print(comp.func)
+                    print(comp.arch)
+                    bl = BASE_LATTICES[comp.arch.bits]
+                    comparer = TypeComparison(bl)
+                    translator = TypeTranslator(comp.arch)
 
-        for comp in itertools.chain(*list(filter(lambda x: x is not None, lst))):
-            print(comp.func)
-            print(comp.arch)
-            bl = BASE_LATTICES[comp.arch.bits]
-            comparer = TypeComparison(bl)
-            translator = TypeTranslator(comp.arch)
-            print(comp.ground_truth_type)
-            total_tdist += comparer.type_distance(
-                translator.simtype2tc(comp.recoverd_fty), comp.ground_truth_type)
-            total_comps += 1
+                    dist = comparer.type_distance(
+                        translator.simtype2tc(comp.recoverd_fty), comp.ground_truth_type, CompState(pset(), pset()))
+                    tot.append(ComparisonData(
+                        bin_name, comp.func.addr, comp.func_size, dist, comp.ns_time_spent_during_inference))
 
-        print(total_tdist)
-        print(total_comps)
+        with open(args.out, "wb") as f:
+            pickle.dump(tot, f)
 
 
 if __name__ == "__main__":
