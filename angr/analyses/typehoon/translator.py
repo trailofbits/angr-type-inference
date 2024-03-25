@@ -78,7 +78,8 @@ class TypeTranslator:
     def _translate_Pointer64(self, tc):
         if isinstance(tc.basetype, typeconsts.BottomType):
             # void *
-            internal = sim_type.SimTypeBottom(label="void").with_arch(self.arch)
+            internal = sim_type.SimTypeBottom(
+                label="void").with_arch(self.arch)
         else:
             internal = self._tc2simtype(tc.basetype)
         return sim_type.SimTypePointer(internal).with_arch(self.arch)
@@ -86,7 +87,8 @@ class TypeTranslator:
     def _translate_Pointer32(self, tc):
         if isinstance(tc.basetype, typeconsts.BottomType):
             # void *
-            internal = sim_type.SimTypeBottom(label="void").with_arch(self.arch)
+            internal = sim_type.SimTypeBottom(
+                label="void").with_arch(self.arch)
         else:
             internal = self._tc2simtype(tc.basetype)
         return sim_type.SimTypePointer(internal).with_arch(self.arch)
@@ -113,14 +115,16 @@ class TypeTranslator:
                 # we need padding!
                 padding_size = offset - next_offset
                 s.fields["padding_%x" % next_offset] = sim_type.SimTypeFixedSizeArray(
-                    sim_type.SimTypeChar(signed=False).with_arch(self.arch), padding_size
+                    sim_type.SimTypeChar(signed=False).with_arch(
+                        self.arch), padding_size
                 ).with_arch(self.arch)
 
             translated_type = self._tc2simtype(typ)
             if isinstance(translated_type, sim_type.SimTypeBottom):
                 # we cannot have bottom types in a struct since that would mess with offsets of all future types
                 # for now, we replace it with an unsigned char
-                translated_type = sim_type.SimTypeChar(signed=False).with_arch(self.arch)
+                translated_type = sim_type.SimTypeChar(
+                    signed=False).with_arch(self.arch)
 
             if tc.field_names and offset in tc.field_names:
                 field_name = tc.field_names[offset]
@@ -196,13 +200,24 @@ class TypeTranslator:
         return typeconsts.Int8()
 
     def _translate_SimStruct(self, st: sim_type.SimStruct) -> typeconsts.Struct:
+        new_st = typeconsts.Struct(fields={})
+        self.translated_simtypes[st] = new_st
         fields = {}
         offsets = st.offsets
         for name, ty in st.fields.items():
             offset = offsets[name]
             fields[offset] = self._simtype2tc(ty)
 
-        return typeconsts.Struct(fields=fields)
+        new_st.fields = fields
+        return new_st
+
+    def _translateSimTypeRef(self, st: sim_type.SimTypeRef) -> typeconsts.TypeConstant:
+        return self._simtype2tc(st.type)
+
+    def _translate_SimTypeFunction(self, st: sim_type.SimTypeFunction) -> typeconsts.Function:
+        nargs = [self._simtype2tc(arg) for arg in st.args]
+        nret = self._simtype2tc(st.returnty)
+        return typeconsts.Function(nargs, [nret])
 
     def _translate_SimTypeArray(self, st: sim_type.SimTypeArray) -> typeconsts.Array:
         elem_type = self._simtype2tc(st.elem_type)
@@ -213,6 +228,7 @@ class TypeTranslator:
         self, st: sim_type.SimTypePointer
     ) -> Union[typeconsts.Pointer32, typeconsts.Pointer64]:
         base = self._simtype2tc(st.pts_to)
+
         if self.arch.bits == 32:
             return typeconsts.Pointer32(base)
         elif self.arch.bits == 64:
@@ -242,4 +258,6 @@ SimTypeHandlers = {
     sim_type.SimTypeChar: TypeTranslator._translate_SimTypeChar,
     sim_type.SimStruct: TypeTranslator._translate_SimStruct,
     sim_type.SimTypeArray: TypeTranslator._translate_SimTypeArray,
+    sim_type.SimTypeFunction: TypeTranslator._translate_SimTypeFunction,
+    sim_type.TypeRef: TypeTranslator._translateSimTypeRef
 }

@@ -151,7 +151,8 @@ class Pointer32(Pointer, Int32):
 
     @memoize
     def __repr__(self, memo=None):
-        bt = self.basetype.__repr__(memo=memo) if isinstance(self.basetype, TypeConstant) else repr(self.basetype)
+        bt = self.basetype.__repr__(memo=memo) if isinstance(
+            self.basetype, TypeConstant) else repr(self.basetype)
         return f"ptr32({bt})"
 
 
@@ -165,7 +166,8 @@ class Pointer64(Pointer, Int64):
 
     @memoize
     def __repr__(self, memo=None):
-        bt = self.basetype.__repr__(memo=memo) if isinstance(self.basetype, TypeConstant) else repr(self.basetype)
+        bt = self.basetype.__repr__(memo=memo) if isinstance(
+            self.basetype, TypeConstant) else repr(self.basetype)
         return f"ptr64({bt})"
 
 
@@ -173,6 +175,13 @@ class Array(TypeConstant):
     def __init__(self, element=None, count=None):
         self.element: Optional[TypeConstant] = element
         self.count: Optional[int] = count
+
+    @property
+    def size(self) -> int:
+        if self.element is not None and self.count is not None:
+            return self.element.size * self.count
+        else:
+            raise NotImplementedError
 
     @memoize
     def __repr__(self, memo=None):
