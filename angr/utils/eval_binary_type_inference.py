@@ -112,7 +112,7 @@ UNSIZED_TYPE_ENCODINGS = {
 class StructOffsets:
     def __init__(self, it: Iterable[StructMember]) -> None:
         self._d = SortedDict(
-            [(mem.addr_offset, mem.type.byte_size) for mem in it])
+            [(mem.addr_offset, mem.type.byte_size) for mem in it if mem.addr_offset is not None and mem.type.byte_size is not None])
 
     def starts_at_end(self, off: int) -> bool:
         leqkey = self._d.bisect_right(off) - 1
@@ -163,15 +163,18 @@ class TypeComparison:
         if t1 not in self.base_lattice or bty not in self.base_lattice:
             return self.max_dist
 
+        # the distance for a primitive type is the average of the distance to the join point
+        join_point = nx.lowest_common_ancestor(self.base_lattice, t1, bty)
+
         try:
-            return nx.shortest_path_length(self.base_lattice, t1, bty)
+            t1len = nx.shortest_path_length(self.base_lattice, join_point, t1)
+            btylen = nx.shortest_path_length(
+                self.base_lattice, join_point, bty)
+            return (float(t1len)+float(btylen))/2.0
         except:
             pass
 
-        try:
-            return nx.shortest_path_length(self.base_lattice, bty, t1)
-        except:
-            pass
+        raise RuntimeError(f"Could not find path between {t1} and {bty}")
 
     def type_of_tdef(self, tdef: TypedefType) -> VariableType:
         t = tdef.type
@@ -237,11 +240,12 @@ class TypeComparison:
                     t1.outputs, [t2.returnty] if t2.returnty is not None else [])
 
                 return (args + outputs)/2.0
-            case (_, BottomGroundType()):
+            case (_, BottomGroundType()) | (_, UnionType()):
                 # if we say we know nothing about the true type,
-                # then we assume 0
+                # then we assume 0, we also do this for union since we dont support
+                # unions
                 return 0
-            case (_, TypedefType()) | (_, UnionType()):
+            case (_, TypedefType()):
                 return self.type_distance(t1, self.type_of_tdef(t2))
             case (TypehoonPointer(), PointerType()):
                 return self.type_distance(t1.basetype,  t2.referenced_type)
@@ -273,7 +277,7 @@ class TypeComparison:
                     return 0.0
                 return total_fld_dist/total_compare
             case (TypehoonArray(), ArrayType()):
-                return self.type_distance(t1.element, t2.element_type())
+                return self.type_distance(t1.element, t2.element_type)
             case (_, BaseType()):
                 if t1 in self.base_lattice:
                     return self.base_type_distance(t1, t2)
@@ -352,7 +356,7 @@ def main():
         total_tdist = 0.0
         total_comps = 0
 
-        for comp in itertools.chain(*lst):
+        for comp in itertools.chain(*list(filter(lambda x: x is not None, lst))):
             print(comp.func)
             print(comp.arch)
             bl = BASE_LATTICES[comp.arch.bits]
