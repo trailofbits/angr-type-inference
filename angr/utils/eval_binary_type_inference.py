@@ -352,7 +352,7 @@ class Evaler:
 
         vtypes_for_functions: list[VTypesForFunction] = []
         for (_, func) in proj.kb.functions.items():
-            r = self.collect_variable_types_for_function(func, proj)
+            r = run_with_timeout(60, self.collect_variable_types_for_function, [func,proj])
             if r is not None:
                 vtypes_for_functions.append(r)
 
@@ -379,7 +379,7 @@ class Evaler:
         return rectypes
 
     def eval_bin_withtimeout(self, target_dir):
-        return (os.path.basename(target_dir), run_with_timeout(360, self.eval_bin, [target_dir]))
+        return (os.path.basename(target_dir), run_with_timeout(400, self.eval_bin, [target_dir]))
 
 
 def main():
