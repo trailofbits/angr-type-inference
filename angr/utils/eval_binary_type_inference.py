@@ -286,7 +286,7 @@ class TypeComparison:
                         total_compare += 1
                         if off in t1.fields and off in members:
                             total_fld_dist += self.type_distance(
-                                t1.fields[off], members[off].type)
+                                t1.fields[off], members[off].type, st)
                 if total_compare == 0:
                     return 0.0
                 return total_fld_dist/total_compare
@@ -352,7 +352,8 @@ class Evaler:
 
         vtypes_for_functions: list[VTypesForFunction] = []
         for (_, func) in proj.kb.functions.items():
-            r = run_with_timeout(60, self.collect_variable_types_for_function, [func,proj])
+            r = run_with_timeout(
+                60, self.collect_variable_types_for_function, [func, proj])
             if r is not None:
                 vtypes_for_functions.append(r)
 
@@ -382,6 +383,12 @@ class Evaler:
         return (os.path.basename(target_dir), run_with_timeout(400, self.eval_bin, [target_dir]))
 
 
+def chunks(lst, n):
+    """Yield successive n-sized chunks from lst."""
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
+
+
 def main():
     prser = argparse.ArgumentParser()
     prser.add_argument("target_dir")
@@ -389,6 +396,9 @@ def main():
     prser.add_argument("-out", required=True)
     prser.add_argument("-algebraic_solver", default=False, action="store_true")
     args = prser.parse_args()
+
+    if os.path.exists(args.out):
+        os.remove(args.out)
 
     tgts = []
     for x in os.listdir(args.target_dir):
@@ -398,12 +408,9 @@ def main():
     max_len = len(tgts) if args.n == 0 else min(args.n, len(tgts))
     evaler = Evaler(args.algebraic_solver)
     with Pool() as p:
-        lst: list[CompResult] = list(
-            tqdm.tqdm(p.imap(evaler.eval_bin_withtimeout, tgts[0:max_len]),  total=len(tgts)))
-
-        tot = []
-        for (bin_name, comps) in lst:
+        for (bin_name, comps) in tqdm.tqdm(p.imap_unordered(evaler.eval_bin_withtimeout, tgts[0:max_len]),  total=len(tgts)):
             if comps is not None:
+                tot = []
                 for comp in comps:
                     print(comp.func)
                     print(comp.arch)
@@ -416,8 +423,9 @@ def main():
                     tot.append(ComparisonData(
                         bin_name, comp.func.addr, comp.func_size, dist, comp.ns_time_spent_during_inference))
 
-        with open(args.out, "wb") as f:
-            pickle.dump(tot, f)
+                with open(args.out, "ab") as f:
+                    for x in tot:
+                        pickle.dump(x, f)
 
 
 if __name__ == "__main__":
