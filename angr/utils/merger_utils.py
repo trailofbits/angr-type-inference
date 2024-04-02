@@ -21,11 +21,19 @@ def main():
 
     args = prser.parse_args()
 
+    def load_all(fl) -> list[ComparisonData]:
+        tot = []
+        while True:
+            try:
+                tot.append(pickle.load(fl))
+            except EOFError:
+                return tot
+
     with open(args.file1, "rb") as f:
-        lst1: list[ComparisonData] = pickle.load(f)
+        lst1: list[ComparisonData] = load_all(f)
 
     with open(args.file2, "rb") as f:
-        lst2: list[ComparisonData] = pickle.load(f)
+        lst2: list[ComparisonData] = load_all(f)
 
     shared_tgts = set()
     for x in itertools.chain(lst1, lst2):
