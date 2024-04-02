@@ -409,7 +409,7 @@ class Evaler:
             nonlocal cons_len
             subbldr = (lambda bits, constraints, typevars: ConstraintGenerator(
                 constraints, bits)) if self._algebriac else SimpleSolver
-            cons_len = len(constraints)
+            cons_len = sum([len(cs) for _, cs in constraints])
             return subbldr(bits, constraints, typevars)
         try:
             cres = project.analyses.Clinic(
