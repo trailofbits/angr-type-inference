@@ -738,17 +738,17 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
 
     def determine_type(self, r: ReprTy, k: TypeVariable):
         aut = TypeAutomata()
-        with open(f"/tmp/{k}_repr", "w") as f:
-            f.write(str(r))
+        #with open(f"/tmp/{k}_repr", "w") as f:
+        #    f.write(str(r))
 
         aut.build_ty_go(r, False)
         assert aut.entry in aut.G.nodes
-        aut.write(f"/tmp/{k}_aut")
+        #aut.write(f"/tmp/{k}_aut")
         det_aut = aut.detereminise()
-        det_aut.write(f"/tmp/{k}_det_aut")
+        #det_aut.write(f"/tmp/{k}_det_aut")
         assert det_aut.entry in det_aut.G.nodes
         min_aut = det_aut.minimise()
-        min_aut.write(f"/tmp/{k}_min_aut")
+        #min_aut.write(f"/tmp/{k}_min_aut")
         assert min_aut.entry in min_aut.G.nodes
         res = self.to_angr_type(min_aut)
         return res
