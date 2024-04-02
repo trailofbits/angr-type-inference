@@ -28,24 +28,115 @@ from archinfo import Arch
 from sortedcontainers import SortedDict
 import pickle
 from pyrsistent import pset, PSet
+from abc import ABC, abstractmethod
+from multiprocessing.connection import Connection
+from concurrent.futures import ProcessPoolExecutor
+from concurrent import futures
+import io
+from multiprocessing import Pool, Queue, Manager
+
+T = typing.TypeVar("T")
 
 
-def run_with_timeout(timeout_secs: int, f, args) -> Any:
-    res = None
+class Runner(ABC):
+    @staticmethod
+    @abstractmethod
+    def build_runner(function, args) -> "Runner":
+        pass
 
-    def runner_with_return(*args):
-        nonlocal res
-        res = f(*args)
+    @abstractmethod
+    def is_alive(self):
+        pass
 
-    proc = Thread(target=runner_with_return, args=args)
-    proc.start()
+    @abstractmethod
+    def get_returned_value(self) -> T | None:
+        pass
+
+    @abstractmethod
+    def kill(self):
+        pass
+
+
+class FWrapper:
+    def __init__(self, f, send) -> None:
+        self.f = f
+        self.send = send
+
+    def run(self, *fargs):
+        res = self.f(*fargs)
+        try:
+            self.send.send(res)
+        except BrokenPipeError:
+            # our parent stopped waiting... fine
+            pass
+
+
+class ProcRunner(Runner):
+    def __init__(self, f, args) -> None:
+        super().__init__()
+        (recv, send) = Pipe(False)
+
+        wrapobj = FWrapper(f, send)
+        self.proc = Process(target=wrapobj.run, args=args)
+        self.recv = recv
+        self.proc.start()
+
+    @staticmethod
+    def build_runner(function, args) -> "Runner":
+        return ProcRunner(function, args)
+
+    def is_alive(self):
+        return self.proc.is_alive()
+
+    def get_returned_value(self) -> T | None:
+        try:
+            if self.recv.poll(1):
+                return self.recv.recv()
+        except:
+            pass
+        return None
+
+    def kill(self):
+        self.proc.kill()
+
+
+class ThreadRunner(Runner):
+    def __init__(self, f, args) -> None:
+        super().__init__()
+        self.result = None
+
+        def wrapped_f(*fargs):
+            self.result = f(*fargs)
+
+        self.thrd = Thread(target=wrapped_f, args=args)
+        self.thrd.start()
+
+    @staticmethod
+    def build_runner(function, args) -> "Runner":
+        return ThreadRunner(function, args)
+
+    def is_alive(self):
+        return self.thrd.is_alive()
+
+    def get_returned_value(self) -> T | None:
+        print(self.result)
+        return self.result
+
+    def kill(self):
+        pass
+
+
+def run_with_timeout(timeout_secs: int, f, args, r: Runner) -> Any:
+    runner = r.build_runner(f, args)
+
     start = time.perf_counter()
     while True:
         time.sleep(1)
-        if not proc.is_alive():
-            return res
+        if not runner.is_alive():
+            return runner.get_returned_value()
         diff = time.perf_counter() - start
         if diff > timeout_secs:
+            runner.kill()
             return None
 
 
@@ -303,13 +394,15 @@ class TypeComparison:
 
 
 class Evaler:
-    def __init__(self, algebriac: bool) -> None:
+    def __init__(self, algebriac: bool, q: Queue) -> None:
         self._algebriac = algebriac
+        self.q = q
 
     def collect_variable_types_for_function(self, func: Function, project: angr.Project) -> None | VTypesForFunction:
         tmp_kb = KnowledgeBase(project)
-        tmp_kb.variables.load_from_dwarf()
-
+        # tmp_kb.variables.load_from_dwarf()
+        if func.size == 0:
+            return None
         cons_len = None
 
         def bldr(bits, constraints, typevars):
@@ -322,19 +415,17 @@ class Evaler:
             cres = project.analyses.Clinic(
                 func, solver_builder=bldr, variable_kb=tmp_kb)
             # func, solver_builder=SimpleSolver)
-        except:
+        except Exception as e:
             return None
         # print(cres.ns_time_spent_in_type_inference)
         if cres.ns_time_spent_in_type_inference == 0:
             return None
 
-        vtyf = VTypesForFunction(func, cons_len, func.prototype,
+        return VTypesForFunction(func, cons_len, func.prototype,
                                  cres.ns_time_spent_in_type_inference)
-        # Clinic should pick a prototype
-
-        return vtyf
 
     def eval_bin(self, target_bin):
+        binname = os.path.basename(target_bin)
         path = pathlib.Path(target_bin).resolve().absolute()
         proj = angr.Project(path, auto_load_libs=False, load_debug_info=True)
         # hack if it's relocatable we load it at 0 so dwarf offsets line up
@@ -345,19 +436,9 @@ class Evaler:
         proj.analyses.CFGFast(normalize=True, data_references=True)
         proj.analyses.CompleteCallingConventions(
             recover_variables=True, analyze_callsites=True)
-
         # so we ensure that we have the same variables as dwarf here
         # angr doesnt populate types from dwarf so this doesnt affect type inference
         proj.kb.variables.load_from_dwarf()
-
-        vtypes_for_functions: list[VTypesForFunction] = []
-        for (_, func) in proj.kb.functions.items():
-            r = run_with_timeout(
-                60, self.collect_variable_types_for_function, [func, proj])
-            if r is not None:
-                vtypes_for_functions.append(r)
-
-        assert func.project is not None
         sigs: dict[int, SimTypeFunction] = {}
         for cu in proj.loader.main_object.compilation_units:
             for (low_pc, f) in cu.functions.items():
@@ -369,18 +450,32 @@ class Evaler:
                 if f.type_offset is not None and f.type_offset in proj.loader.main_object.type_list:
                     retty = proj.loader.main_object.type_list[f.type_offset]
                 sigs[low_pc] = SimTypeFunction(dwarf_sig_args, retty)
-        print(sigs)
-        rectypes = []
-        for vtype in vtypes_for_functions:
-            if vtype is not None:
-                if vtype.func.addr in sigs:
-                    groundsig = sigs[vtype.func.addr]
-                    rectypes.append(CompResult(
-                        vtype.func,  vtype.func_size, vtype.ns_time_spent_during_type_inference, vtype.fty, groundsig, func.project.arch))
-        return rectypes
+
+        failed_funcs = []
+        for (_, func) in proj.kb.functions.items():
+            if func.addr in sigs:
+                vtype = None
+                try:
+                    vtype = run_with_timeout(
+                        60, self.collect_variable_types_for_function, [func, proj], ThreadRunner)
+                except:
+                    pass
+                if vtype is not None:
+                    print(f"trying to send {vtype.func.addr:x}")
+                    if vtype.func.addr in sigs:
+                        groundsig = sigs[vtype.func.addr]
+                        self.q.put((binname, CompResult(vtype.func,  vtype.func_size,
+                                   vtype.ns_time_spent_during_type_inference, vtype.fty, groundsig, func.project.arch)))
+                else:
+                    self.q.put(f"{binname}: Failed func {func.addr}\n")
+
+        return True
 
     def eval_bin_withtimeout(self, target_dir):
-        return (os.path.basename(target_dir), run_with_timeout(400, self.eval_bin, [target_dir]))
+        if not run_with_timeout(400, self.eval_bin, [
+                target_dir], ProcRunner):
+            self.q.put(f"Timeout on {os.path.basename(target_dir)}\n")
+        return
 
 
 def chunks(lst, n):
@@ -395,6 +490,9 @@ def main():
     prser.add_argument("-n", default=0, type=int)
     prser.add_argument("-out", required=True)
     prser.add_argument("-algebraic_solver", default=False, action="store_true")
+    prser.add_argument("-num_proc", type=int, default=os.cpu_count())
+    prser.add_argument(
+        "-failure_log", type=argparse.FileType("w"), required=True)
     args = prser.parse_args()
 
     if os.path.exists(args.out):
@@ -406,12 +504,23 @@ def main():
             tgts.append(os.path.join(args.target_dir, x))
 
     max_len = len(tgts) if args.n == 0 else min(args.n, len(tgts))
-    evaler = Evaler(args.algebraic_solver)
-    with Pool() as p:
-        for (bin_name, comps) in tqdm.tqdm(p.imap_unordered(evaler.eval_bin_withtimeout, tgts[0:max_len]),  total=len(tgts)):
-            if comps is not None:
-                tot = []
-                for comp in comps:
+    with Manager() as m:
+        q = m.Queue()
+
+        evaler = Evaler(args.algebraic_solver, q)
+        log: io.BufferedRandom = args.failure_log
+        with ProcessPoolExecutor(max_workers=args.num_proc) as p:
+            futs = []
+
+            for x in tgts[0:max_len]:
+                print(x)
+                futs.append(p.submit(evaler.eval_bin_withtimeout, x))
+
+            
+
+            def recv_item(name_and_comp, totfl):
+                if isinstance(name_and_comp, tuple):
+                    (bin_name, comp) = name_and_comp
                     print(comp.func)
                     print(comp.arch)
                     bl = BASE_LATTICES[comp.arch.bits]
@@ -420,12 +529,30 @@ def main():
 
                     dist = comparer.type_distance(
                         translator.simtype2tc(comp.recoverd_fty), comp.ground_truth_type, CompState(pset(), pset()))
-                    tot.append(ComparisonData(
-                        bin_name, comp.func.addr, comp.func_size, dist, comp.ns_time_spent_during_inference))
+                    pickle.dump(ComparisonData(
+                        bin_name, comp.func.addr, comp.func_size, dist, comp.ns_time_spent_during_inference), totfl)
+                if isinstance(name_and_comp, str):
+                    log.write(name_and_comp)
 
-                with open(args.out, "ab") as f:
-                    for x in tot:
-                        pickle.dump(x, f)
+            isdone = False
+
+            def rec_items():
+                totfl = open(args.out, "ab+")
+                nonlocal isdone
+                while not isdone:
+                    try:
+                        recv_item(q.get(timeout=1), totfl)
+                    except:
+                        pass
+                totfl.close()
+            thrd = Thread(target=rec_items)
+            thrd.start()
+            for x in tqdm.tqdm(futures.as_completed(futs),  total=max_len):
+                print(x.exception())
+
+            isdone = True
+            log.close()
+            thrd.join()
 
 
 if __name__ == "__main__":
