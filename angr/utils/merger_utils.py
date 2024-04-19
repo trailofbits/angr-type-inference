@@ -60,6 +60,9 @@ def main():
         average_time = tot_time/len(fltered)
         print(len(fltered))
 
+        print([(x.binary_name, x.func_addr, x.ns_time_spent_during_inference)
+              for x in fltered if x.func_size > 500])
+
         time_by_size = list(
             map(lambda x: (x.func_size, x.ns_time_spent_during_inference), fltered))
 
@@ -71,6 +74,7 @@ def main():
         plt.xlabel("Number of Constraints")
         plt.ylabel("Time (ns)")
         plt.savefig(tgt, format="svg")
+        plt.close()
     agg1 = get_dist_total_and_average(lst1)
     if args.out1:
         plot_agg(agg1, args.out1)
