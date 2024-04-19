@@ -455,17 +455,26 @@ class Evaler:
         failed_funcs = []
         for (_, func) in proj.kb.functions.items():
             if func.addr in sigs:
+                old_proto = func.prototype
+                was_guessed = func.is_prototype_guessed
                 vtype = None
                 tot_time = 0.0
                 is_invalid = False
                 try:
                     for _ in range(0, self.microbenchmarks):
-                        vtype: VTypesForFunction = run_with_timeout(
+                        cvtype: VTypesForFunction = run_with_timeout(
                             60, self.collect_variable_types_for_function, [func, proj], ThreadRunner)
-                        if vtype is None:
+                        if cvtype is None:
                             is_invalid = True
-                        if vtype is not None:
-                            tot_time += vtype.ns_time_spent_during_type_inference
+                        if cvtype is not None:
+                            tot_time += cvtype.ns_time_spent_during_type_inference
+                        if vtype is None and cvtype is not None:
+                            vtype = cvtype
+
+                        # undo type commits.
+                        if old_proto is not None:
+                            func.prototype = old_proto
+                            func.is_prototype_guessed = was_guessed
                 except:
                     pass
                 if vtype is not None and not is_invalid:
