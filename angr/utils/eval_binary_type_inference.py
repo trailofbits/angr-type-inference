@@ -525,7 +525,7 @@ def main():
     with Manager() as m:
         q = m.Queue()
 
-        evaler = Evaler(args.algebraic_solver, q)
+        evaler = Evaler(args.algebraic_solver, q, args.microbenchmarks)
         log: io.BufferedRandom = args.failure_log
         with ProcessPoolExecutor(max_workers=args.num_proc) as p:
             futs = []
