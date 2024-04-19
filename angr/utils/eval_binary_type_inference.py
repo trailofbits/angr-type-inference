@@ -394,8 +394,9 @@ class TypeComparison:
 
 
 class Evaler:
-    def __init__(self, algebriac: bool, q: Queue) -> None:
+    def __init__(self, algebriac: bool, q: Queue, microbenchmarks: int) -> None:
         self._algebriac = algebriac
+        self.microbenchmarks = microbenchmarks
         self.q = q
 
     def collect_variable_types_for_function(self, func: Function, project: angr.Project) -> None | VTypesForFunction:
@@ -455,24 +456,31 @@ class Evaler:
         for (_, func) in proj.kb.functions.items():
             if func.addr in sigs:
                 vtype = None
+                tot_time = 0.0
+                is_invalid = False
                 try:
-                    vtype = run_with_timeout(
-                        60, self.collect_variable_types_for_function, [func, proj], ThreadRunner)
+                    for _ in range(0, self.microbenchmarks):
+                        vtype: VTypesForFunction = run_with_timeout(
+                            60, self.collect_variable_types_for_function, [func, proj], ThreadRunner)
+                        if vtype is None:
+                            is_invalid = True
+                        if vtype is not None:
+                            tot_time += vtype.ns_time_spent_during_type_inference
                 except:
                     pass
-                if vtype is not None:
+                if vtype is not None and not is_invalid:
                     print(f"trying to send {vtype.func.addr:x}")
                     if vtype.func.addr in sigs:
                         groundsig = sigs[vtype.func.addr]
                         self.q.put((binname, CompResult(vtype.func,  vtype.func_size,
-                                   vtype.ns_time_spent_during_type_inference, vtype.fty, groundsig, func.project.arch)))
+                                   tot_time/self.microbenchmarks, vtype.fty, groundsig, func.project.arch)))
                 else:
                     self.q.put(f"{binname}: Failed func {func.addr}\n")
 
         return True
 
     def eval_bin_withtimeout(self, target_dir):
-        if not run_with_timeout(400, self.eval_bin, [
+        if not run_with_timeout(400 * self.microbenchmarks, self.eval_bin, [
                 target_dir], ProcRunner):
             self.q.put(f"Timeout on {os.path.basename(target_dir)}\n")
         return
@@ -491,6 +499,7 @@ def main():
     prser.add_argument("-out", required=True)
     prser.add_argument("-algebraic_solver", default=False, action="store_true")
     prser.add_argument("-num_proc", type=int, default=os.cpu_count())
+    prser.add_argument("-microbenchmarks", type=int, required=False, default=1)
     prser.add_argument(
         "-failure_log", type=argparse.FileType("w"), required=True)
     args = prser.parse_args()
@@ -515,8 +524,6 @@ def main():
             for x in tgts[0:max_len]:
                 print(x)
                 futs.append(p.submit(evaler.eval_bin_withtimeout, x))
-
-            
 
             def recv_item(name_and_comp, totfl):
                 if isinstance(name_and_comp, tuple):
