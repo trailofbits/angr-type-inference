@@ -20,8 +20,7 @@ def main():
     prser = argparse.ArgumentParser("merge_eval_files")
     prser.add_argument("file1")
     prser.add_argument("file2")
-    prser.add_argument("--out1", default=None, required=False, type=str)
-    prser.add_argument("--out2", default=None, required=False, type=str)
+    prser.add_argument("--out", default=None, required=False, type=str)
 
     args = prser.parse_args()
 
@@ -42,6 +41,8 @@ def main():
     tgts_1 = set([(x.binary_name, x.func_addr) for x in lst1])
     tgts_2 = set([(x.binary_name, x.func_addr) for x in lst2])
     shared_tgts = set.intersection(tgts_1, tgts_2)
+
+    print("Number of comparable targets: ", len(shared_tgts))
 
     def get_dist_total_and_average(lst: list[ComparisonData]) -> AggregateScores:
         seen_set = set()
@@ -68,20 +69,22 @@ def main():
 
         return AggregateScores(tot_dist, average_dist, tot_time, average_time, time_by_size)
 
-    def plot_agg(agg, tgt):
+    
+    plt.xlabel("Number of Constraints")
+    plt.ylabel("Time (ns)")
+    def plot_agg(agg, label, color):
         plt.plot([x for (x, _) in agg.time_by_size],
-                 [y for (_, y) in agg.time_by_size], 'ro')
-        plt.xlabel("Number of Constraints")
-        plt.ylabel("Time (ns)")
-        plt.savefig(tgt, format="svg")
-        plt.close()
+                 [y for (_, y) in agg.time_by_size], color, label=label)
     agg1 = get_dist_total_and_average(lst1)
-    if args.out1:
-        plot_agg(agg1, args.out1)
+    if args.out:
+        plot_agg(agg1, "Typehoon", 'ro')
 
     agg2 = get_dist_total_and_average(lst2)
-    if args.out2:
-        plot_agg(agg2, args.out2)
+    if args.out:
+        plot_agg(agg2, "BinSub", 'bo')
+        plt.legend(loc="best")
+        plt.savefig(args.out, format="svg")
+        plt.close()
 
     print("Tgt1 average diff: ", agg1.average_diff)
     print("Tgt2 average diff: ", agg2.average_diff)
