@@ -20,6 +20,8 @@ def main():
     prser = argparse.ArgumentParser("merge_eval_files")
     prser.add_argument("file1")
     prser.add_argument("file2")
+    prser.add_argument("--disable_plot_file1", default=False, action="store_true")
+    prser.add_argument("--disable_plot_file2", default=False, action="store_true")
     prser.add_argument("--out", default=None, required=False, type=str)
 
     args = prser.parse_args()
@@ -77,11 +79,13 @@ def main():
                  [y for (_, y) in agg.time_by_size], color, label=label)
     agg1 = get_dist_total_and_average(lst1)
     if args.out:
-        plot_agg(agg1, "Typehoon", 'ro')
+        if not args.disable_plot_file1:
+            plot_agg(agg1, "Typehoon", 'ro')
 
     agg2 = get_dist_total_and_average(lst2)
     if args.out:
-        plot_agg(agg2, "BinSub", 'bo')
+        if not args.disable_plot_file2:
+            plot_agg(agg2, "BinSub", 'bo')
         plt.legend(loc="best")
         plt.savefig(args.out, format="svg")
         plt.close()
