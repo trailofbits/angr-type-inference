@@ -33,11 +33,13 @@ from multiprocessing.connection import Connection
 from concurrent.futures import ProcessPoolExecutor
 from concurrent import futures
 import io
-from multiprocessing import Pool, Queue, Manager
+from multiprocessing import Pool, Queue, Manager, Value
 
 T = typing.TypeVar("T")
 
 
+TIMEOUT_COUNTER=Value("I", 0)
+NUM_EXCEPTIONS=Value("I", 0)
 class Runner(ABC):
     @staticmethod
     @abstractmethod
@@ -156,6 +158,7 @@ class CompResult:
     recoverd_fty: SimTypeFunction
     ground_truth_type: SimTypeFunction
     arch: Arch
+    time_list: list[int]
 
 
 @dataclass
@@ -165,6 +168,7 @@ class ComparisonData:
     func_size: int
     type_distance: float
     ns_time_spent_during_inference: int
+    time_list: list[int]
 
 
 @dataclass
@@ -426,6 +430,8 @@ class Evaler:
                                  cres.ns_time_spent_in_type_inference)
 
     def eval_bin(self, target_bin):
+        global TIMEOUT_COUNTER
+        global NUM_EXCEPTIONS
         binname = os.path.basename(target_bin)
         path = pathlib.Path(target_bin).resolve().absolute()
         proj = angr.Project(path, auto_load_libs=False, load_debug_info=True)
@@ -458,6 +464,7 @@ class Evaler:
                 old_proto = func.prototype
                 was_guessed = func.is_prototype_guessed
                 vtype = None
+                time_list = []
                 tot_time = 0.0
                 is_invalid = False
                 try:
@@ -467,6 +474,7 @@ class Evaler:
                         if cvtype is None:
                             is_invalid = True
                         if cvtype is not None:
+                            time_list.append(cvtype.ns_time_spent_during_type_inference)
                             tot_time += cvtype.ns_time_spent_during_type_inference
                         if vtype is None and cvtype is not None:
                             vtype = cvtype
@@ -476,20 +484,25 @@ class Evaler:
                             func.prototype = old_proto
                             func.is_prototype_guessed = was_guessed
                 except:
-                    pass
+                    with NUM_EXCEPTIONS.get_lock():
+                        NUM_EXCEPTIONS.value += 1
+                if is_invalid:
+                    with TIMEOUT_COUNTER.get_lock():
+                        TIMEOUT_COUNTER.value += 1
+
                 if vtype is not None and not is_invalid:
                     print(f"trying to send {vtype.func.addr:x}")
                     if vtype.func.addr in sigs:
                         groundsig = sigs[vtype.func.addr]
                         self.q.put((binname, CompResult(vtype.func,  vtype.func_size,
-                                   tot_time/self.microbenchmarks, vtype.fty, groundsig, func.project.arch)))
+                                   tot_time/self.microbenchmarks, vtype.fty, groundsig, func.project.arch, time_list=time_list)))
                 else:
                     self.q.put(f"{binname}: Failed func {func.addr}\n")
 
         return True
 
     def eval_bin_withtimeout(self, target_dir):
-        if not run_with_timeout(400 * self.microbenchmarks, self.eval_bin, [
+        if not run_with_timeout(800 * self.microbenchmarks, self.eval_bin, [
                 target_dir], ProcRunner):
             self.q.put(f"Timeout on {os.path.basename(target_dir)}\n")
         return
@@ -502,6 +515,7 @@ def chunks(lst, n):
 
 
 def main():
+    global TIMEOUT_COUNTER
     prser = argparse.ArgumentParser()
     prser.add_argument("target_dir")
     prser.add_argument("-n", default=0, type=int)
@@ -546,7 +560,7 @@ def main():
                     dist = comparer.type_distance(
                         translator.simtype2tc(comp.recoverd_fty), comp.ground_truth_type, CompState(pset(), pset()))
                     pickle.dump(ComparisonData(
-                        bin_name, comp.func.addr, comp.func_size, dist, comp.ns_time_spent_during_inference), totfl)
+                        bin_name, comp.func.addr, comp.func_size, dist, comp.ns_time_spent_during_inference, comp.time_list), totfl)
                 if isinstance(name_and_comp, str):
                     log.write(name_and_comp)
 
@@ -569,6 +583,13 @@ def main():
             isdone = True
             log.close()
             thrd.join()
+
+            with TIMEOUT_COUNTER.get_lock():
+                with NUM_EXCEPTIONS.get_lock():
+                        with open(f"{args.out}.timeouts","w") as f:
+                            print("NUM FUNCTION TIMEOUTS: ", TIMEOUT_COUNTER)
+                            f.write(f"timeouts {TIMEOUT_COUNTER}\n")
+                            f.write(f"timeouts {NUM_EXCEPTIONS}\n")
 
 
 if __name__ == "__main__":
