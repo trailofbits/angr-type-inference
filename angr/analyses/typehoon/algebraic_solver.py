@@ -682,12 +682,15 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
                     current_type = nty
             new_fields[offset] = current_type
         s.fields = new_fields
+        print(s)
         return s
 
     def build_pointer(self, nd: int,  G: nx.MultiDiGraph, dict_nodes, pol: bool) -> TypehoonPointer:
         es = self.build_edges(nd, G, [(LoadLabel(), pol),
                                       (StoreLabel(), not pol)], dict_nodes)
-        return self.pointer_builder(es[0])
+
+        res = max(es, key=self.ty_const_to_priority)
+        return self.pointer_builder(res)
 
     def build_function(self, nd: int,  G: nx.MultiDiGraph, func: "FuncCons", dict_nodes, pol: bool) -> TypehoonFunc:
         params = [(Parameter(x), not pol) for x in range(0, max(func.params))]
