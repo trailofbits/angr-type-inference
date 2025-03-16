@@ -9,6 +9,7 @@ import networkx
 
 import ailment
 from ...analyses.typehoon.simple_solver import SimpleSolver
+from ...analyses.typehoon.algebraic_solver import ConstraintGenerator
 from ...knowledge_base import KnowledgeBase
 from ...knowledge_plugins.functions import Function
 from ...knowledge_plugins.cfg.memory_data import MemoryDataSort
@@ -93,7 +94,7 @@ class Clinic(Analysis):
         rewrite_ites_to_diamonds=True,
         cache: Optional["DecompilationCache"] = None,
         mode: ClinicMode = ClinicMode.DECOMPILE,
-        solver_builder = SimpleSolver
+        solver_builder = lambda bits, constraints, variables: ConstraintGenerator(constraints, bits)
     ):
         if not func.normalized and mode == ClinicMode.DECOMPILE:
             raise ValueError("Decompilation must work on normalized function graphs.")
