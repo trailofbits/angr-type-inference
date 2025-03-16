@@ -23,6 +23,8 @@ from typing import TypeVar, Callable, Optional, Generator
 from collections import deque
 from sortedcontainers import SortedDict
 # A type variable is a unique holder of constraints
+from typing import Generic, Type
+import typing
 
 
 class DisjointSet:
@@ -608,9 +610,28 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
                 return (src, dst, symb)
         return None
 
+    def ty_const_to_priority(self, ty_const: TypeConstant) -> int:
+        print(ty_const)
+        match ty_const:
+            case typeconsts.Int() | typeconsts.FloatBase():
+                print("match 0")
+                return 0
+            case typeconsts.Pointer() | typeconsts.Array():
+                print("match 1")
+                return 1
+            case typeconsts.Struct():
+                print("match 2")
+                return 2
+            case _:
+                print("match 0")
+                return 0
+
     def collect_edges_of(self, nd: int,  G: nx.MultiDiGraph, look_for: "AlphabetSymbol", dict_nodes: dict[int, int], pol: bool) -> Optional[TypeConstant]:
         # TODO(Ian): join and meet
-        return next(map(lambda d: self.build_angr_type_for_node(d, G, dict_nodes), [dst for (_, dst, symb) in G.out_edges(nd, data=TypeAutomata.SYMB_NAME) if symb == look_for]), None)
+        l = list(map(lambda d: self.build_angr_type_for_node(d, G, dict_nodes), [dst for (
+            _, dst, symb) in G.out_edges(nd, data=TypeAutomata.SYMB_NAME) if symb == look_for]))
+        print(l)
+        return max(l, key=self.ty_const_to_priority, default=None)
 
     def build_edges(self, nd: int,  G: nx.MultiDiGraph, look_for: list[tuple["AlphabetSymbol", bool]], dict_nodes: dict[int, int]) -> list[TypeConstant]:
         tot = []
@@ -626,6 +647,8 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
         s = self.get_or_replace_struct(nd)
         es = dict(zip(cons.fields, self.build_edges(nd, G, [(RecordLabel(v), pol)
                                                             for v in cons.fields], dict_nodes)))
+        print(nd)
+        print("Edges: ", es)
         # greedily select a nonoverlapping set of fields
         by_size = sorted(list(es.keys()), key=lambda x: x.size, reverse=True)
         covered: SortedDict[int, int] = SortedDict()
@@ -704,7 +727,7 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
 
         return TypehoonTop() if st.polarity else TypehoonBot()
 
-    def to_angr_type(self, ty: "TypeAutomata") -> TypeConstant:
+    def to_angr_type(self, ty: "TypeAutomata", k: TypeVariable) -> TypeConstant:
         # first we break loops
         # iirc doing this optimally is np-hard
         # so for now something sensible... select
@@ -734,23 +757,25 @@ class ConstraintGenerator(BaseSolver, VariableHandler):
                         ty.add_edge(backup_edge[0], dst, backup_edge[2])
             if not cycles:
                 break
+
+        ty.write(f"/tmp/{k}_scc_aut")
         return self.build_angr_type_for_node(ty.entry, ty.G, ty.named_struct_nodes)
 
     def determine_type(self, r: ReprTy, k: TypeVariable):
         aut = TypeAutomata()
-        #with open(f"/tmp/{k}_repr", "w") as f:
+        # with open(f"/tmp/{k}_repr", "w") as f:
         #    f.write(str(r))
 
         aut.build_ty_go(r, False)
         assert aut.entry in aut.G.nodes
-        #aut.write(f"/tmp/{k}_aut")
+        aut.write(f"/tmp/{k}_aut")
         det_aut = aut.detereminise()
-        #det_aut.write(f"/tmp/{k}_det_aut")
+        det_aut.write(f"/tmp/{k}_det_aut")
         assert det_aut.entry in det_aut.G.nodes
         min_aut = det_aut.minimise()
-        #min_aut.write(f"/tmp/{k}_min_aut")
+        min_aut.write(f"/tmp/{k}_min_aut")
         assert min_aut.entry in min_aut.G.nodes
-        res = self.to_angr_type(min_aut)
+        res = self.to_angr_type(min_aut, k)
         return res
 
     def build_solution(self):
@@ -944,6 +969,10 @@ class Constructor(ABC):
         pass
 
     @abstractmethod
+    def struct_join(self, o: "Constructor") -> "Constructor":
+        pass
+
+    @abstractmethod
     def geq(self, o: "Constructor") -> "Constructor":
         pass
 
@@ -961,6 +990,9 @@ class FVCons(Constructor):
 
     def meet(self, o: "FVCons") -> "FVCons":
         return FVCons(self.representing.union(o.representing))
+
+    def struct_join(self, o: "FVCons") -> "FVCons":
+        return self.join(o)
 
     def geq(self, o: "FVCons") -> bool:
         return self.representing.issubset(o.representing)
@@ -984,6 +1016,9 @@ class RecCons(Constructor):
     def geq(self, o: "FVCons") -> bool:
         return self.fields.issubset(o)
 
+    def struct_join(self, o: "PointerCons"):
+        return self.meet(o)
+
 
 @dataclass(frozen=True)
 class PointerCons(Constructor):
@@ -999,6 +1034,9 @@ class PointerCons(Constructor):
 
     def geq(self, o: "PointerCons") -> bool:
         return True
+
+    def struct_join(self, o: "PointerCons"):
+        return self
 
 
 @dataclass(frozen=True)
@@ -1037,6 +1075,9 @@ class AtomicType(Constructor):
             case (Atom(), Atom()):
                 return self.atom.meet(o.atom)
 
+    def struct_join(self, o: "AtomicType") -> "AtomicType":
+        return self.join(o)
+
     def geq(self, o: "AtomicType") -> bool:
         match (self.atom, o.atom):
             case (Top(), _) | (_, Bottom()):
@@ -1061,7 +1102,10 @@ class FuncCons(Constructor):
         return Func(self.params.union(o.params), self.rets.intersection(o.rets))
 
     def meet(self, o: "FuncCons") -> "FuncCons":
-        return FVCons(self.params.intersection(o.params), self.rets.union(o.rets))
+        return FuncCons(self.params.intersection(o.params), self.rets.union(o.rets))
+
+    def struct_join(self, o: "FuncCons") -> "FuncCons":
+        return FuncCons(self.params.union(o.params), self.rets.union(o.rets))
 
     def geq(self, o: "FuncCons") -> bool:
         self.params.issubset(o.params) and self.rets.issubset(o.rets)
@@ -1093,6 +1137,40 @@ class TypeLattice:
         return all([k in o.map_domain and self.map_domain[k].geq(o.map_domain[k]) for k in self.map_domain])
 
 # We need automata with a lot of extra bookkeeping so we just implement everything custom...
+
+
+@dataclass(frozen=True)
+class DepthSubtypingLattice:
+    map_domain: PMap[ConstructorID, Constructor]
+
+    def join(self, x: "DepthSubtypingLattice"):
+        ks = set(x.map_domain.keys()).union(self.map_domain.keys())
+
+        def maybe_join(x: Optional[Constructor], y: Optional[Constructor]) -> Constructor:
+            if x is not None and y is not None:
+                return x.struct_join(y)
+            elif x:
+                return x
+            else:
+                return y
+
+        return DepthSubtypingLattice(pmap([(k, maybe_join(self.map_domain.get(k), x.map_domain.get(k))) for k in ks]))
+
+    def meet(self, x: "DepthSubtypingLattice"):
+        ks = set(x.map_domain.keys()).union(self.map_domain.keys())
+
+        def maybe_meet(x: Optional[Constructor], y: Optional[Constructor]) -> Constructor:
+            if x is not None and y is not None:
+                return x.meet(y)
+            elif x:
+                return x
+            else:
+                return y
+
+        return DepthSubtypingLattice(pmap([(k, maybe_meet(self.map_domain.get(k), x.map_domain.get(k))) for k in ks]))
+
+    def geq(self, o: "DepthSubtypingLattice") -> bool:
+        return all([k in o.map_domain and self.map_domain[k].geq(o.map_domain[k]) for k in self.map_domain])
 
 
 # Edges
@@ -1144,7 +1222,7 @@ class AutState:
 T = TypeVar("T")
 
 
-class TypeAutomata:
+class TypeAutomata(Generic[T]):
     SYMB_NAME = "label"
     STATE_NAME = "state"
 
@@ -1157,6 +1235,7 @@ class TypeAutomata:
     entry: Optional[int]
     subnode_map: dict[int, PSet[int]]
     named_struct_nodes: dict[int, int]
+    lattice_ty: Type[T]
 
     def __init__(self) -> None:
         self.next_id = 0
@@ -1167,9 +1246,10 @@ class TypeAutomata:
         self.subnode_map = dict()
         self.epsilon_subgraph = None
         self.named_struct_nodes = {}
+        self.lattice_ty = DepthSubtypingLattice
 
     def singleton(self, pol: bool, cons: Constructor) -> AutState:
-        return AutState(pol, TypeLattice(pmap([(cons.ident, cons)])))
+        return AutState(pol, self.lattice_ty(pmap([(cons.ident, cons)])))
 
     def add_named_struct_node(self, target: int) -> int:
         ndid = self.fresh_node_id()
@@ -1237,7 +1317,7 @@ class TypeAutomata:
                 lnd = self.build(l, polarity)
                 rnd = self.build(rh, polarity)
                 pnode = self.add_node(r, AutState(
-                    polarity, TypeLattice(pmap())))
+                    polarity, self.lattice_ty(pmap())))
                 self.add_edge(pnode, lnd, Epsilon())
                 self.add_edge(pnode, rnd, Epsilon())
                 return pnode

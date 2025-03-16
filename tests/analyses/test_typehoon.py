@@ -32,6 +32,31 @@ test_location = os.path.join(bin_location, "tests")
 
 class TestTypehoon(unittest.TestCase):
 
+    def test_repro_no_fields(self):
+        # demo2.exe.please.rename.to.demo2.exe.txt.adb
+        db = AngrDB()
+        proj: angr.Project = db.load(os.path.join(
+            test_location, "x86_64", "demo2.exe.please.rename.to.demo2.exe.txt.adb"))
+        vr = proj.analyses.VariableRecoveryFast(
+            proj.kb.functions["sub_4000b0"])
+        proj.analyses.CompleteCallingConventions(
+            proj.kb.functions["sub_4000b0"])
+        print(vr.type_constraints)
+        print(vr.var_to_typevars)
+        solved = ConstraintGenerator(vr.type_constraints, 64)
+        print(type(solved.solution))
+        print(solved.solution)
+
+        print(solved.base_var_map)
+
+        for ty, expr in solved.base_var_map.items():
+            print(ty)
+            if ty.idx is not None and ty.idx == 5:
+                cty = solved.coalesce_acc(
+                    expr, pmap(), False)
+                print("Coalesced tv05: ", cty)
+                print("deteremined: ", solved.determine_type(cty, ty))
+
     def test_rec_type_solver(self):
         tv_func = TypeVariable()
 
@@ -62,8 +87,7 @@ class TestTypehoon(unittest.TestCase):
             test_location, "x86_64", "mooosl.adb"))
         vr = proj.analyses.VariableRecoveryFast(proj.kb.functions["lookup"])
         proj.analyses.CompleteCallingConventions(proj.kb.functions["lookup"])
-        # print(vr.type_constraints)
-
+        print(vr.type_constraints)
         # res = proj.analyses.Typehoon(vr.type_constraints, vr.func_typevar,
         #                             var_mapping=vr.var_to_typevars)
 

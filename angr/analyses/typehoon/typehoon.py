@@ -36,7 +36,8 @@ class Typehoon(Analysis):
         ground_truth=None,
         var_mapping: Optional[Dict["SimVariable", Set["TypeVariable"]]] = None,
         must_struct: Optional[Set["TypeVariable"]] = None,
-        solver_builder = SimpleSolver
+        solver_builder=lambda bits, constraints, typevars: algebraic_solver.ConstraintGenerator(
+            constraints, bits)
     ):
         """
 
@@ -48,8 +49,10 @@ class Typehoon(Analysis):
         """
 
         self.func_var: "TypeVariable" = func_var
-        self._constraints: Dict["TypeVariable", Set["TypeConstraint"]] = constraints
-        self._ground_truth: Optional[Dict["TypeVariable", "SimType"]] = ground_truth
+        self._constraints: Dict["TypeVariable",
+                                Set["TypeConstraint"]] = constraints
+        self._ground_truth: Optional[Dict["TypeVariable",
+                                          "SimType"]] = ground_truth
         self._var_mapping = var_mapping
         self._must_struct = must_struct
 
@@ -86,7 +89,8 @@ class Typehoon(Analysis):
                     name = None
                     if isinstance(type_, SimStruct):
                         name = type_.name
-                    self.kb.variables[func_addr].set_variable_type(var, type_, name=name)
+                    self.kb.variables[func_addr].set_variable_type(
+                        var, type_, name=name)
 
     def pp_constraints(self) -> None:
         """
@@ -114,7 +118,8 @@ class Typehoon(Analysis):
         if self._var_mapping is None:
             raise ValueError("Variable mapping does not exist.")
         if self.solution is None:
-            raise RuntimeError("Please run type solver before calling pp_solution().")
+            raise RuntimeError(
+                "Please run type solver before calling pp_solution().")
 
         typevar_to_var = {}
         for k, typevars in self._var_mapping.items():
@@ -140,7 +145,8 @@ class Typehoon(Analysis):
         if self._ground_truth:
             translator = TypeTranslator(arch=self.project.arch)
             for tv, sim_type in self._ground_truth.items():
-                self._constraints[self.func_var].add(Equivalence(tv, translator.simtype2tc(sim_type)))
+                self._constraints[self.func_var].add(
+                    Equivalence(tv, translator.simtype2tc(sim_type)))
 
         self._solve()
         self._specialize()
@@ -163,7 +169,7 @@ class Typehoon(Analysis):
                         typevars.add(constraint.sub_type)
                     if isinstance(constraint.super_type, TypeVariable):
                         typevars.add(constraint.super_type)
-        #solver = algebraic_solver.ConstraintGenerator(self._constraints, self.bits)
+        # solver = algebraic_solver.ConstraintGenerator(self._constraints, self.bits)
         solver = self.solver_builder(self.bits, self._constraints, typevars)
         self.solution = solver.solution
 
@@ -186,13 +192,15 @@ class Typehoon(Analysis):
         if isinstance(tc, Pointer):
             if memo is not None and tc in memo:
                 return None
-            specialized = self._specialize_struct(tc.basetype, memo={tc} if memo is None else memo | {tc})
+            specialized = self._specialize_struct(
+                tc.basetype, memo={tc} if memo is None else memo | {tc})
             if specialized is None:
                 return None
             return tc.new(specialized)
 
         if isinstance(tc, Struct) and tc.fields:
-            offsets: List[int] = sorted(list(tc.fields.keys()))  # get a sorted list of offsets
+            # get a sorted list of offsets
+            offsets: List[int] = sorted(list(tc.fields.keys()))
             offset0 = offsets[0]
             field0: TypeConstant = tc.fields[offset0]
 
@@ -227,7 +235,8 @@ class Typehoon(Analysis):
         needs_backpatch = set()
 
         for tv, sol in self.solution.items():
-            simtypes_solution[tv], has_nonexistent_ref = translator.tc2simtype(sol)
+            simtypes_solution[tv], has_nonexistent_ref = translator.tc2simtype(
+                sol)
             if has_nonexistent_ref:
                 needs_backpatch.add(tv)
 
