@@ -1,3 +1,33 @@
+# Fork note:
+
+This is a fork of the [angr project](https://github.com/angr/angr) for experimentation. This code is experimental.
+
+The fork expriments with an algebraic subtyping-based type solver in Clinic/Typehoon. 
+Further details are available in the paper: [BinSub: The Simple Essence of Polymorphic Type Inference for Machine Code](https://arxiv.org/abs/2409.01841).
+
+The original README is below. There are two relevant branches:
+* [ian/updated-fork](https://github.com/trailofbits/angr-type-inference/tree/ian/updated-fork) this branch was used for the paper's experiments.
+* [ian/depth-subtyping](https://github.com/trailofbits/angr-type-inference/tree/ian/depth-subtyping) some further experiments where width subtyping is eliminated internal to functions
+
+If you reference this work please cite the paper as follows:
+
+```bibtex
+@inproceedings{smith_binsub_2025,
+	address = {Cham},
+	title = {{BinSub}: {The} {Simple} {Essence} of {Polymorphic} {Type} {Inference} for {Machine} {Code}},
+	isbn = {978-3-031-74776-2},
+	shorttitle = {{BinSub}},
+	doi = {10.1007/978-3-031-74776-2_17},
+	abstract = {Recovering high-level type information in binaries is a key task in reverse engineering and binary analysis. Binaries contain very little explicit type information. The structure of binary code is incredibly flexible allowing for ad-hoc subtyping and polymorphism. Prior work has shown that precise type inference on binary code requires expressive subtyping and polymorphism.},
+	language = {en},
+	booktitle = {Static {Analysis}},
+	publisher = {Springer Nature Switzerland},
+	author = {Smith, Ian},
+	editor = {Giacobazzi, Roberto and Gorla, Alessandra},
+	year = {2025},
+	pages = {425--450},
+}
+```
 # angr
 
 [![Latest Release](https://img.shields.io/pypi/v/angr.svg)](https://pypi.python.org/pypi/angr/)
